@@ -19,6 +19,13 @@ ENV UV_COMPILE_BYTECODE=1
 ENV HF_HOME=/app/.cache/huggingface
 ENV TORCH_HOME=/app/.cache/torch
 
+# Browser tools: keep Chromium binaries under /app so they travel with the
+# application into the production stage, and run headless without the
+# Chromium sandbox inside the container.
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
+ENV BROWSER_HEADLESS=1
+ENV BROWSER_NO_SANDBOX=1
+
 # --- Build stage ---
 # Install dependencies, build native extensions, and prepare the application
 FROM base AS build
@@ -47,6 +54,11 @@ RUN mkdir -p src
 # This creates a virtual environment and installs all dependencies
 # Ensure your uv.lock file is checked in for consistency across environments
 RUN uv sync --locked
+
+# Download the Playwright Chromium binary used by the agent's browser tools.
+# This runs before COPY . . so the download layer is cached across code-only
+# changes; the binaries land under /app/.cache and are copied to production.
+RUN uv run playwright install chromium
 
 # Pre-download any ML models or files the agent needs
 # This runs before COPY . . so the download layer is cached across code-only changes.
@@ -79,6 +91,11 @@ RUN adduser \
 COPY --from=build --chown=appuser:appuser /app /app
 
 WORKDIR /app
+
+# Install the OS libraries Chromium needs at runtime (must run as root,
+# before switching to the non-privileged user).
+RUN uv run playwright install-deps chromium \
+  && rm -rf /var/lib/apt/lists/*
 
 # Switch to the non-privileged user for all subsequent operations
 # This improves security by not running as root

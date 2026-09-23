@@ -19,6 +19,13 @@ jobs:
       LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
       LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
       LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+      # The agent's browser tools run headless and without the Chromium
+      # sandbox on the CI runner.
+      BROWSER_HEADLESS: "1"
+      BROWSER_NO_SANDBOX: "1"
+      # Gemini realtime needs Google API access in CI; the local .env.local
+      # file is intentionally never committed.
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
 
     steps:
     - uses: actions/checkout@v6
@@ -35,6 +42,9 @@ jobs:
 
     - name: Install dependencies
       run: UV_GIT_LFS=1 uv sync
+
+    - name: Install Playwright Chromium
+      run: uv run playwright install --with-deps chromium
 
     - name: Download model files
       run: uv run python src/agent.py download-files

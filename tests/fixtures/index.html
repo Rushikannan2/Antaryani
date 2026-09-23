@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Test Page</title>
+  </head>
+  <body>
+    <h1>Welcome to the test page</h1>
+    <p id="status">Idle</p>
+    <p id="after-click" hidden>You clicked the greeting button</p>
+    <p id="late"></p>
+
+    <button
+      id="greeting"
+      onclick="document.getElementById('after-click').hidden = false; document.getElementById('status').textContent = 'Greeted';"
+    >
+      Greeting
+    </button>
+
+    <a href="/second.html">Documentation</a>
+
+    <form
+      id="signup"
+      onsubmit="event.preventDefault(); document.getElementById('form-status').textContent = 'Form submitted';"
+    >
+      <label for="search-terms">Search terms</label>
+      <input
+        id="search-terms"
+        name="q"
+        type="text"
+        oninput="document.getElementById('echo').textContent = this.value ? 'You typed ' + this.value : ''"
+      />
+      <span id="echo"></span>
+
+      <label for="country">Country</label>
+      <select id="country">
+        <option value="in">India</option>
+        <option value="uk">United Kingdom</option>
+        <option value="zm">Zambia</option>
+      </select>
+
+      <label><input id="remember" type="checkbox" /> Remember me</label>
+      <p id="check-status">Remember me is unchecked</p>
+      <script>
+        document.getElementById("remember").addEventListener("change", function () {
+          document.getElementById("check-status").textContent =
+            "Remember me is now " + (this.checked ? "checked" : "unchecked");
+        });
+      </script>
+
+      <button type="submit">Send</button>
+      <p id="form-status">Form not submitted</p>
+    </form>
+
+    <script>
+      setTimeout(function () {
+        document.getElementById("late").textContent = "Late content arrived";
+      }, 800);
+    </script>
+  </body>
+</html>

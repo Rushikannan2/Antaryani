@@ -48,3 +48,50 @@ scenarios:
       alternative, such as the friend using the official account recovery flow.
     tags:
       feature: guardrails
+
+  - label: Opens a named website and reads it
+    instructions: |
+      PERSONA: A user who wants the assistant to fetch something from a specific website.
+      OPENING LINE: "Srilatha, open example.com and tell me what it says."
+      DO, IN ORDER:
+      1. Let the assistant open the site and report its contents.
+      2. Ask: "Is there anything else on the page?"
+      3. Once it answers, say thanks and end the conversation.
+    agent_expectations: >
+      Opens example.com directly rather than routing through a search engine,
+      reads the page, and reports its contents in brief spoken prose: no lists,
+      no markdown, no raw tool output or internal identifiers. Keeps the
+      butler persona and addresses the user as Rushi Sir.
+    tags:
+      feature: browser
+
+  - label: General web search fallback
+    instructions: |
+      PERSONA: A user looking for public information without naming a website.
+      OPENING LINE: "Can you look up online what time the British Museum closes today?"
+      DO, IN ORDER:
+      1. Let the assistant search and answer.
+      2. Ask: "Are you sure about that?"
+      3. Once it clarifies its confidence or sources, say thanks and end the conversation.
+    agent_expectations: >
+      Uses a general web search since no website was named, reads the search
+      results page before answering, and gives a brief spoken answer that
+      mentions uncertainty or sources when the results conflict. Does not
+      invent a specific closing time with false confidence.
+    tags:
+      feature: browser
+
+  - label: Replies in the user's language
+    instructions: |
+      PERSONA: A Hindi-speaking user who expects the assistant to reply in Hindi. Write your spoken lines in Hindi (Devanagari script).
+      OPENING LINE: "नमस्ते Srilatha, मुझे हिंदी में जवाब देना।"
+      DO, IN ORDER:
+      1. After the assistant replies in Hindi, ask in Hindi: "आज मौसम कैसा है?"
+      2. Once it answers, switch to English and say: "Thanks, that is all." and end the conversation.
+    agent_expectations: >
+      Replies in Hindi when spoken to in Hindi, keeps the butler persona, and
+      addresses the user as Rushi Sir. When the user switches to English, it
+      switches back to English. Never claims it can only speak English or
+      refuses to use another language.
+    tags:
+      feature: languages

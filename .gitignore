@@ -1,15 +1,114 @@
+# ============================================================
+# Environment files & secrets — NEVER commit
+# ============================================================
 .env
 .env.*
 !.env.example
-.DS_Store
-__pycache__
-.idea
+!.env.*.example
+*.pem
+*.key
+credentials.json
+secrets.*
 KMS
-.venv
-.vscode
-*.egg-info
-.pytest_cache
-.ruff_cache
+
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+
+# ============================================================
+# Virtual environments
+# ============================================================
+.venv/
+venv/
+env/
+ENV/
+
+# ============================================================
+# Node / frontend (belt & suspenders — frontend/.gitignore also applies)
+# ============================================================
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# ============================================================
+# Logs, temp files, local tool configuration
+# ============================================================
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+.cache/
+# OpenCode local config (contains no secrets; re-add this line's file to track it)
+opencode.json
+
+# ============================================================
+# OS / IDE
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# ============================================================
+# Generated browser artifacts (Playwright screenshots etc.)
+# ============================================================
+.screenshots/
+playwright-report/
+test-results/
+
+# ============================================================
+# Notebook checkpoints
+# ============================================================
+.ipynb_checkpoints/
+
+# ============================================================
+# ML / AI artifacts & datasets — large binaries stay local
+# ============================================================
+models/
+model/
+checkpoints/
+runs/
+wandb/
+mlruns/
+data/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+*.bin
+*.safetensors
+*.h5
+*.pkl
+*.pickle
+*.joblib
+*.npz
+*.npy
+*.parquet
+*.arrow
+
+# ============================================================
+# AI coding assistant local state (project docs like AGENTS.md,
+# CLAUDE.md, .claude/skills/ stay tracked)
+# ============================================================
 
 # Claude Code
 .claude/settings.local.json
