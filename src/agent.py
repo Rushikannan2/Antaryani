@@ -1,3 +1,9 @@
+import contextlib
+import logging
+import sys
+from collections.abc import Iterable
+from typing import TextIO
+
 from dotenv import load_dotenv
 from google.genai import types as genai_types
 from livekit.agents import (
@@ -16,6 +22,46 @@ from livekit.plugins import ai_coustics, google
 from browser import BrowserManager
 from prompts import AGENT_INSTRUCTIONS
 from tools import BrowserTools
+
+
+def configure_unicode_logs(streams: Iterable[TextIO] | None = None) -> None:
+    """Force UTF-8 on every stream that logging writes to.
+
+    On Windows the standard streams default to the locale codepage (e.g.
+    cp1252), which cannot encode non-Latin scripts. Logging a multilingual
+    conversation item (Hindi, Tamil, Chinese, ...) then raises
+    UnicodeEncodeError, the record is lost, and Python prints a
+    ``--- Logging error ---`` traceback. Reconfiguring to UTF-8 with
+    ``errors="replace"`` keeps every transcript loggable; unencodable lone
+    surrogates degrade to ``?`` instead of crashing the handler.
+    """
+    default_streams = (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__)
+    targets = list(streams or default_streams)
+
+    # Also cover any handler stream logging has already been configured with
+    # (root logger plus every named logger), not just the standard streams.
+    for logger in [
+        logging.getLogger(),
+        *(
+            item
+            for item in logging.Logger.manager.loggerDict.values()
+            if isinstance(item, logging.Logger)
+        ),
+    ]:
+        for handler in logger.handlers:
+            stream = getattr(handler, "stream", None)
+            if stream is not None and stream not in targets:
+                targets.append(stream)
+
+    for stream in targets:
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        # A closed or broken stream must never prevent the agent from starting.
+        with contextlib.suppress(ValueError, OSError):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+configure_unicode_logs()
 
 load_dotenv(".env.local")
 
@@ -67,6 +113,11 @@ server = AgentServer()
 
 @server.rtc_session(agent_name="my-agent")
 async def my_agent(ctx: JobContext):
+    # The job process may attach or swap log streams during bootstrap, after
+    # this module was imported; re-apply so transcripts (in any language)
+    # always log cleanly instead of crashing cp1252 writers.
+    configure_unicode_logs()
+
     # Logging setup
     # Add any other context you want in all log entries here
     ctx.log_context_fields = {
