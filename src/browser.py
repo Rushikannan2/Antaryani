@@ -826,6 +826,6 @@ class BrowserManager:
 
     @staticmethod
     def _timestamp() -> str:
-        from datetime import UTC, datetime
+        from datetime import datetime, timezone
 
-        return datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+        return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")

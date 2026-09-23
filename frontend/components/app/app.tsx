@@ -6,6 +6,7 @@ import { useSession } from '@livekit/components-react';
 import { WarningIcon } from '@phosphor-icons/react/dist/ssr';
 import { AgentSessionProvider } from '@/components/agents-ui/agent-session-provider';
 import { StartAudioButton } from '@/components/agents-ui/start-audio-button';
+import { ConfirmationBanner } from '@/components/app/confirmation-banner';
 import { ViewController } from '@/components/app/view-controller';
 import { Toaster } from '@/components/ui/sonner';
 import { useAgentErrors } from '@/hooks/useAgentErrors';
@@ -41,6 +42,7 @@ export function App({ tokenServerId, tokenEndpoint, agentName, isVideoInputSuppo
   return (
     <AgentSessionProvider session={session}>
       <AppSetup />
+      <ConfirmationBanner />
       <main className="grid h-svh grid-cols-1 place-content-center">
         <ViewController isVideoInputSupported={isVideoInputSupported} />
       </main>

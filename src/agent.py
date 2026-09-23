@@ -1,7 +1,9 @@
+import asyncio
 import contextlib
+import json
 import logging
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TextIO
 
 from dotenv import load_dotenv
@@ -20,8 +22,12 @@ from livekit.agents.beta.tools import EndCallTool
 from livekit.plugins import ai_coustics, google
 
 from browser import BrowserManager
+from confirmation import CONFIRMATION_TOPIC
 from prompts import AGENT_INSTRUCTIONS
 from tools import BrowserTools
+from windows_tools import WindowsTools
+
+logger = logging.getLogger(__name__)
 
 
 def configure_unicode_logs(streams: Iterable[TextIO] | None = None) -> None:
@@ -67,9 +73,18 @@ load_dotenv(".env.local")
 
 
 class Assistant(Agent):
-    def __init__(self, browser: BrowserManager | None = None) -> None:
+    def __init__(
+        self,
+        browser: BrowserManager | None = None,
+        confirmation_publisher: Callable[[dict], None] | None = None,
+    ) -> None:
         self.browser = browser or BrowserManager(headless=True)
-        self.browser_tools = BrowserTools(self.browser)
+        self.browser_tools = BrowserTools(
+            self.browser, confirmation_publisher=confirmation_publisher
+        )
+        # Windows filesystem tools (Part 2): one ConfirmationManager per
+        # session, held inside this instance.
+        self.windows_tools = WindowsTools(confirmation_publisher=confirmation_publisher)
         self._end_call_tool = EndCallTool(
             extra_description=(
                 "Only end the call after the user clearly says they are finished, "
@@ -104,6 +119,7 @@ class Assistant(Agent):
             tools=[
                 *self.browser_tools.tools,
                 *self._end_call_tool.tools,
+                *self.windows_tools.tools,
             ],
         )
 
@@ -126,6 +142,35 @@ async def my_agent(ctx: JobContext):
 
     browser = BrowserManager(headless=False)
     ctx.add_shutdown_callback(browser.close)
+
+    # Confirmation codes travel only to the user's own screen: a targeted
+    # room data message on a dedicated topic, captured at session start and
+    # read from this list at publish time (empty = broadcast, which is safe
+    # because each room is fresh and random per token).
+    identities: list[str] = []
+
+    def publish_confirmation(payload: dict) -> None:
+        """Send a confirmation code out of band; never into the model."""
+        data = json.dumps(payload).encode("utf-8")
+
+        def _on_done(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.warning(
+                    "confirmation publish failed",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        asyncio.create_task(
+            ctx.room.local_participant.publish_data(
+                data,
+                reliable=True,
+                destination_identities=list(identities),
+                topic=CONFIRMATION_TOPIC,
+            )
+        ).add_done_callback(_on_done)
 
     # Gemini realtime handles the voice input and output for this session.
     session = AgentSession(
@@ -157,7 +202,7 @@ async def my_agent(ctx: JobContext):
 
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
-        agent=Assistant(browser),
+        agent=Assistant(browser, confirmation_publisher=publish_confirmation),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             video_input=True,
@@ -171,6 +216,8 @@ async def my_agent(ctx: JobContext):
 
     # Join the room and connect to the user
     await ctx.connect()
+    # Session-start identities: confirmation codes go only to these devices.
+    identities.extend(ctx.room.remote_participants)
 
 
 if __name__ == "__main__":

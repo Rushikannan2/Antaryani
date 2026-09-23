@@ -1,5 +1,9 @@
 import base64
 import logging
+import secrets
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -7,6 +11,13 @@ from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ImageContent, ToolError
 
 from browser import BrowserError, BrowserManager
+from confirmation import (
+    CONFIRMATION_TTL_SECONDS,
+    MAX_CODE_ATTEMPTS,
+    announce_confirmation,
+    code_matches,
+    new_confirmation_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +61,28 @@ def _normalize_label(label: str) -> str:
     return " ".join(label.casefold().split())
 
 
+@dataclass
+class _BrowserPending:
+    """A staged browser action awaiting genuine user confirmation."""
+
+    token: str
+    label: str  # normalized target label
+    code: str
+    expires_at: float  # time.monotonic() deadline
+    attempts: int = 0
+
+
 class BrowserTools:
-    def __init__(self, browser: BrowserManager) -> None:
+    def __init__(
+        self,
+        browser: BrowserManager,
+        confirmation_publisher: Callable[[dict], None] | None = None,
+        confirmation_ttl: float = CONFIRMATION_TTL_SECONDS,
+    ) -> None:
         self.browser = browser
+        self._confirmation_publisher = confirmation_publisher
+        self._confirmation_ttl = confirmation_ttl
+        self._pending_browser: dict[str, _BrowserPending] = {}
         self._confirmed_label: str | None = None
 
     @property
@@ -100,13 +130,49 @@ class BrowserTools:
     ) -> None:
         if not force and not self._requires_confirmation(label):
             return
-        if self._confirmed_label != _normalize_label(label):
-            raise ToolError(
-                f"This action may be consequential. Explain what {purpose} {label!r} "
-                "will do, ask the user to confirm it, then call confirm_browser_action "
-                f"with target {label!r} before retrying."
+        normalized = _normalize_label(label)
+        if self._confirmed_label == normalized:
+            self._confirmed_label = None
+            return
+        # Stage a single-use pending confirmation bound to this exact label.
+        # An active staging for the same label is reused so its code stays
+        # stable across retries; expired entries are dropped.
+        now = time.monotonic()
+        pending: _BrowserPending | None = None
+        for token in list(self._pending_browser):
+            candidate = self._pending_browser[token]
+            if now >= candidate.expires_at:
+                del self._pending_browser[token]
+                continue
+            if candidate.label == normalized:
+                pending = candidate
+        if pending is None:
+            pending = _BrowserPending(
+                token=secrets.token_urlsafe(16),
+                label=normalized,
+                code=new_confirmation_code(),
+                expires_at=now + self._confirmation_ttl,
             )
-        self._confirmed_label = None
+            self._pending_browser[pending.token] = pending
+        announce_confirmation(
+            self._confirmation_publisher,
+            token=pending.token,
+            code=pending.code,
+            description=f"{purpose} {label}",
+            operation="browser_action",
+            source=label,
+            destination=None,
+            expires_in=self._confirmation_ttl,
+        )
+        raise ToolError(
+            f"Staged for user confirmation: token '{pending.token}'. "
+            f"This action may be consequential. Explain what {purpose} "
+            f"{label!r} will do and ask the user to confirm. The six-digit "
+            "confirmation code is shown to the user only, never to you; he "
+            "must read back that exact code to you. Call "
+            f"confirm_browser_action with this token, that code, and target "
+            f"{label!r} before retrying."
+        )
 
     # ------------------------------------------------------------------
     # navigation and reading
@@ -301,15 +367,48 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
-    async def confirm_browser_action(self, context: RunContext, target: str) -> str:
+    async def confirm_browser_action(
+        self, context: RunContext, target: str, token: str, code: str
+    ) -> str:
         """Authorize one previously discussed consequential browser action.
 
-        Call this only after the user explicitly confirms the exact action.
+        Call this only after the user explicitly confirms the exact action
+        AND reads back the six-digit confirmation code shown only to him.
 
         Args:
             target: The exact target wording the user approved.
+            token: The single-use token from the staged message.
+            code: The six-digit confirmation code the user read back.
         """
-        self._confirmed_label = _normalize_label(target)
+        pending = self._pending_browser.get(token)
+        if pending is None:
+            raise ToolError(
+                "No pending confirmation matches that token; it may have "
+                "expired, been used, or been cancelled."
+            )
+        if time.monotonic() >= pending.expires_at:
+            del self._pending_browser[token]
+            raise ToolError(
+                "The staged confirmation has expired; ask the user to confirm again."
+            )
+        if not code_matches(pending.code, code):
+            pending.attempts += 1
+            if pending.attempts >= MAX_CODE_ATTEMPTS:
+                del self._pending_browser[token]
+                raise ToolError(
+                    "Too many wrong confirmation codes; the staged action "
+                    "has been withdrawn."
+                )
+            raise ToolError(
+                "The confirmation code does not match the code shown to the user."
+            )
+        if _normalize_label(target) != pending.label:
+            raise ToolError(
+                "The confirmation does not match the staged action; it was "
+                "staged for a different target."
+            )
+        del self._pending_browser[token]  # single use
+        self._confirmed_label = pending.label
         return f"The user confirmed {target!r}."
 
     @function_tool()

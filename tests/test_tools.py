@@ -5,6 +5,7 @@ These run against a fake BrowserManager, so no browser is needed.
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -107,11 +108,15 @@ async def test_risky_click_requires_confirmation_then_passes_once() -> None:
     fake = FakeBrowser()
     tools = BrowserTools(fake)
 
-    with pytest.raises(ToolError, match="confirm_browser_action"):
+    with pytest.raises(ToolError, match="confirm_browser_action") as excinfo:
         await tools.click(make_context(), target="Send message")
     assert fake.called == []  # nothing executed before confirmation
+    token = str(excinfo.value).split("'")[1]
+    code = tools._pending_browser[token].code
 
-    await tools.confirm_browser_action(make_context(), target="Send message")
+    await tools.confirm_browser_action(
+        make_context(), target="Send message", token=token, code=code
+    )
     await tools.click(make_context(), target="Send message")
     assert fake.called == ["click"]
 
@@ -131,9 +136,13 @@ async def test_benign_click_is_not_gated() -> None:
 async def test_confirmation_is_case_and_whitespace_insensitive() -> None:
     fake = FakeBrowser()
     tools = BrowserTools(fake)
-    with pytest.raises(ToolError):
+    with pytest.raises(ToolError) as excinfo:
         await tools.click(make_context(), target="Send message")
-    await tools.confirm_browser_action(make_context(), target="  send   MESSAGE ")
+    token = str(excinfo.value).split("'")[1]
+    code = tools._pending_browser[token].code
+    await tools.confirm_browser_action(
+        make_context(), target="  send   MESSAGE ", token=token, code=code
+    )
     await tools.click(make_context(), target="Send message")
     assert fake.called == ["click"]
 
@@ -143,10 +152,14 @@ async def test_submit_form_always_requires_confirmation() -> None:
     tools = BrowserTools(fake)
 
     # even a benign-looking form control is gated
-    with pytest.raises(ToolError, match="confirm_browser_action"):
+    with pytest.raises(ToolError, match="confirm_browser_action") as excinfo:
         await tools.submit_form(make_context(), target="Search")
+    token = str(excinfo.value).split("'")[1]
+    code = tools._pending_browser[token].code
 
-    await tools.confirm_browser_action(make_context(), target="Search")
+    await tools.confirm_browser_action(
+        make_context(), target="Search", token=token, code=code
+    )
     await tools.submit_form(make_context(), target="Search")
     assert fake.called == ["submit_form"]
 
@@ -155,10 +168,14 @@ async def test_risky_select_option_is_gated() -> None:
     fake = FakeBrowser()
     tools = BrowserTools(fake)
 
-    with pytest.raises(ToolError, match="confirm_browser_action"):
+    with pytest.raises(ToolError, match="confirm_browser_action") as excinfo:
         await tools.select_option(make_context(), target="Action", value="delete all")
+    token = str(excinfo.value).split("'")[1]
+    code = tools._pending_browser[token].code
 
-    await tools.confirm_browser_action(make_context(), target="Action: delete all")
+    await tools.confirm_browser_action(
+        make_context(), target="Action: delete all", token=token, code=code
+    )
     await tools.select_option(make_context(), target="Action", value="delete all")
     assert fake.called == ["select_option"]
 
@@ -279,3 +296,128 @@ def test_tools_property_exposes_every_expected_tool() -> None:
     tools = BrowserTools(FakeBrowser())
     names = {tool.id for tool in tools.tools}
     assert names == EXPECTED_TOOL_NAMES
+
+
+# ----------------------------------------------------------------------
+# Part 6: the code never reaches the model (out-of-band only)
+# ----------------------------------------------------------------------
+async def test_staged_message_hides_the_code() -> None:
+    tools = BrowserTools(FakeBrowser())
+    with pytest.raises(ToolError) as excinfo:
+        await tools.click(make_context(), target="Send message")
+    message = str(excinfo.value)
+    token = message.split("'")[1]
+    code = tools._pending_browser[token].code
+
+    assert message.startswith("Staged for user confirmation: token '")
+    assert "confirm_browser_action" in message
+    assert "six-digit confirmation code" in message
+    assert "read back" in message
+    assert code not in message  # the model never sees the code
+
+
+async def test_confirmation_code_is_published_out_of_band() -> None:
+    sent: list[dict] = []
+    tools = BrowserTools(FakeBrowser(), confirmation_publisher=sent.append)
+    with pytest.raises(ToolError) as excinfo:
+        await tools.click(make_context(), target="Send message")
+    message = str(excinfo.value)
+    token = message.split("'")[1]
+    code = tools._pending_browser[token].code
+
+    assert len(sent) == 1
+    payload = sent[0]
+    assert payload["type"] == "confirmation"
+    assert payload["token"] == token
+    assert payload["code"] == code
+    assert code not in message
+
+
+async def test_wrong_code_is_refused_and_staging_survives() -> None:
+    fake = FakeBrowser()
+    tools = BrowserTools(fake)
+    with pytest.raises(ToolError) as excinfo:
+        await tools.click(make_context(), target="Send message")
+    token = str(excinfo.value).split("'")[1]
+    code = tools._pending_browser[token].code
+    wrong = "999999" if code != "999999" else "999998"
+
+    with pytest.raises(ToolError, match="confirmation code"):
+        await tools.confirm_browser_action(
+            make_context(), target="Send message", token=token, code=wrong
+        )
+    assert fake.called == []  # the real user can still confirm
+
+    await tools.confirm_browser_action(
+        make_context(), target="Send message", token=token, code=code
+    )
+    await tools.click(make_context(), target="Send message")
+    assert fake.called == ["click"]
+
+
+async def test_three_wrong_codes_withdraw_the_staging() -> None:
+    from confirmation import MAX_CODE_ATTEMPTS
+
+    fake = FakeBrowser()
+    tools = BrowserTools(fake)
+    with pytest.raises(ToolError) as excinfo:
+        await tools.click(make_context(), target="Send message")
+    token = str(excinfo.value).split("'")[1]
+    code = tools._pending_browser[token].code
+    wrong = "999999" if code != "999999" else "999998"
+
+    for attempt in range(MAX_CODE_ATTEMPTS):
+        expected = "withdrawn" if attempt == MAX_CODE_ATTEMPTS - 1 else "confirmation"
+        with pytest.raises(ToolError, match=expected):
+            await tools.confirm_browser_action(
+                make_context(), target="Send message", token=token, code=wrong
+            )
+    with pytest.raises(ToolError, match="token"):
+        await tools.confirm_browser_action(
+            make_context(), target="Send message", token=token, code=code
+        )
+    assert fake.called == []
+
+
+async def test_browser_confirmation_expires() -> None:
+    fake = FakeBrowser()
+    tools = BrowserTools(fake, confirmation_ttl=0.05)
+    with pytest.raises(ToolError) as excinfo:
+        await tools.click(make_context(), target="Send message")
+    token = str(excinfo.value).split("'")[1]
+    code = tools._pending_browser[token].code
+    time.sleep(0.1)
+
+    with pytest.raises(ToolError, match="expired"):
+        await tools.confirm_browser_action(
+            make_context(), target="Send message", token=token, code=code
+        )
+    assert token not in tools._pending_browser
+
+
+async def test_payload_mismatch_does_not_burn_code_attempts() -> None:
+    fake = FakeBrowser()
+    tools = BrowserTools(fake)
+    with pytest.raises(ToolError) as excinfo:
+        await tools.click(make_context(), target="Send message")
+    token = str(excinfo.value).split("'")[1]
+    code = tools._pending_browser[token].code
+
+    for _ in range(3):  # wrong target + right code: attempts stay untouched
+        with pytest.raises(ToolError, match="does not match"):
+            await tools.confirm_browser_action(
+                make_context(), target="Delete everything", token=token, code=code
+            )
+    await tools.confirm_browser_action(
+        make_context(), target="Send message", token=token, code=code
+    )
+    await tools.click(make_context(), target="Send message")
+    assert fake.called == ["click"]
+
+
+async def test_confirm_browser_action_requires_a_code() -> None:
+    tools = BrowserTools(FakeBrowser())
+    with pytest.raises(TypeError):
+        await tools.confirm_browser_action(
+            make_context(), target="Send message", token="tok"
+        )
