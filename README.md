@@ -211,6 +211,8 @@ pnpm build
 
 Never run `pnpm build` while `pnpm dev` is running.
 
+**`⚠ Port 3000 is in use by process …, using available port 3001 instead`** — a second `pnpm dev` is already running (a leftover from another terminal or an earlier session). The new instance still works — just on the port it printed — but two dev servers on one checkout also share `frontend/.next`, which can produce transient `ENOENT` / `Cannot find module for page: …/route` noise and restarts in their logs. Keep a single instance: press `Ctrl+C` in the older terminal (or end the process named in the warning), then run `pnpm dev` again — it will claim `http://localhost:3000`.
+
 **Amber “Dashboard API offline” banner / JSON 503 on `/api/dashboard/*` (once: raw `ECONNREFUSED`)** — the local dashboard API on `127.0.0.1:8787` is not up yet (the agent is stopped or still booting). The frontend proxy converts this to a clean JSON 503 with `Retry-After` — no stack traces — the dashboard shows its offline banner and slows its polling, then recovers automatically when the API returns. The API autostarts at worker boot; for frontend-only work start it directly with `uv run python src/dashboard_api.py`.
 
 **`SyntaxError: Unexpected end of JSON input` from `POST /api/token`** — the token endpoint now reads the raw request body first: an empty body is valid and simply means "no room configuration" (the route issues a token with defaults), malformed JSON returns `400` instead of crashing, and every error path returns a response. If you still see this on an older checkout, pull the latest code.
