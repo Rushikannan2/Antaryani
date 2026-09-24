@@ -1671,3 +1671,94 @@ def test_unknown_app_message_lists_office_apps() -> None:
     assert "word" in message
     assert "powerpoint" in message
     assert "excel" in message
+
+
+# ----------------------------------------------------------------------
+# folder analysis: one-call summary for the open/inspect workflow
+# ----------------------------------------------------------------------
+def test_list_directory_summary_counts_kinds_sizes_and_recency(tmp_path) -> None:
+    (tmp_path / "sub").mkdir()
+    old = tmp_path / "old.docx"
+    old.write_bytes(b"doc!")
+    text_file = tmp_path / "a.txt"
+    text_file.write_text("hi", encoding="utf-8")
+    video = tmp_path / "b.mp4"
+    video.write_bytes(b"\x00\x00\x00")
+    newest = tmp_path / "c.pdf"
+    newest.write_bytes(b"\x00" * 5)
+    # explicit timestamps so the recency order is deterministic
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    os.utime(text_file, (2_000_000_000, 2_000_000_000))
+    os.utime(video, (3_000_000_000, 3_000_000_000))
+    os.utime(newest, (4_000_000_000, 4_000_000_000))
+
+    summary = list_directory(str(tmp_path))["summary"]
+
+    assert summary["files"] == 4
+    assert summary["folders"] == 1
+    assert summary["total_size_bytes"] == 4 + 2 + 3 + 5
+    assert summary["by_extension"] == {".docx": 1, ".mp4": 1, ".pdf": 1, ".txt": 1}
+    assert summary["newest_files"] == ["c.pdf", "b.mp4", "a.txt", "old.docx"]
+
+
+def test_list_directory_summary_is_accurate_past_the_entry_cap(tmp_path) -> None:
+    # The listing caps what it DISPLAYS, but the analysis must count ALL
+    # files so the spoken summary stays accurate in a huge folder.
+    total = MAX_LIST_ENTRIES + 5
+    for index in range(total):
+        (tmp_path / f"f{index:04d}.txt").write_text("", encoding="utf-8")
+    result = list_directory(str(tmp_path))
+    assert result["count"] == MAX_LIST_ENTRIES
+    assert result["truncated"] is True
+    assert result["summary"]["files"] == total
+
+
+# ----------------------------------------------------------------------
+# reliable deletion: read-only items and a clear recycle failure
+# ----------------------------------------------------------------------
+def test_delete_readonly_file_succeeds(tmp_path) -> None:
+    # Windows refuses to unlink a read-only file outright (files copied
+    # from discs, protected Office documents, locked screenshots);
+    # deletion must clear the flag and still verify the removal.
+    import stat
+
+    target = tmp_path / "readonly.txt"
+    target.write_text("x", encoding="utf-8")
+    os.chmod(target, stat.S_IREAD)
+    result = delete_path(str(target))
+    assert result["deleted"] is True
+    assert not target.exists()
+
+
+def test_delete_folder_with_readonly_children_succeeds(tmp_path) -> None:
+    import stat
+
+    folder = tmp_path / "protected"
+    (folder / "sub").mkdir(parents=True)
+    ro_file = folder / "deck.pptx"
+    ro_file.write_bytes(b"\x00")
+    inner = folder / "sub" / "inner.pdf"
+    inner.write_bytes(b"\x00")
+    os.chmod(ro_file, stat.S_IREAD)
+    os.chmod(inner, stat.S_IREAD)
+    result = delete_path(str(folder), recursive=True)
+    assert result["deleted"] is True
+    assert not folder.exists()
+
+
+def test_recycle_failure_names_the_recycle_bin(tmp_path, monkeypatch) -> None:
+    # The model must see WHAT failed so it can explain it naturally (and
+    # only offer permanent deletion if the user explicitly asks).
+    import windows_fs
+
+    target = tmp_path / "huge.mp4"
+    target.write_bytes(b"\x00")
+
+    def boom(_path):
+        raise OSError("the file is too large for the Recycle Bin")
+
+    monkeypatch.setattr(windows_fs, "_recycle", boom)
+    with pytest.raises(WindowsFSError) as excinfo:
+        recycle_path(str(target))
+    assert _code(excinfo) == "OS_ERROR"
+    assert "Recycle Bin" in str(excinfo.value)

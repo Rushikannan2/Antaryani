@@ -552,11 +552,25 @@ def test_stage_returns_pending_record(tmp_path) -> None:
     assert manager.pending() == (pending,)
 
 
-def test_stage_tokens_are_unique(tmp_path) -> None:
+def test_stage_same_payload_keeps_the_same_token_and_code(tmp_path) -> None:
+    # Reliability fix: retrying the SAME staged action must keep the token
+    # AND the six-digit code the user is already reading. Minting a fresh
+    # code on every attempt was the "the code changes after each attempt"
+    # loop: the screen changed while the model still held the old token,
+    # so every read-back mismatched. Uniqueness now applies only across
+    # DIFFERENT payloads (asserted in the stage-dedupe tests below).
     manager = ConfirmationManager()
-    first = manager.stage(operation="delete_path", description="d", source=tmp_path)
-    second = manager.stage(operation="delete_path", description="d", source=tmp_path)
-    assert first.token != second.token
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+    first = manager.stage(
+        operation="delete_path", description="delete it", source=source
+    )
+    second = manager.stage(
+        operation="delete_path", description="delete it", source=source
+    )
+    assert first.token == second.token
+    assert first.code == second.code
+    assert manager.pending() == (first,)
 
 
 def test_confirm_requires_a_known_token(tmp_path) -> None:
@@ -869,3 +883,58 @@ def test_edit_file_has_consumes_source_policy() -> None:
     policy = _OPERATION_POLICIES["edit_file"]
     assert policy.consumes_source is True
     assert policy.writes_destination is False
+
+
+# ----------------------------------------------------------------------
+# stage dedupe: retries never churn the code shown to the user, and
+# different payloads always stay separate confirmations
+# ----------------------------------------------------------------------
+def test_stage_different_source_issues_a_new_token(tmp_path) -> None:
+    manager = ConfirmationManager()
+    one = tmp_path / "one.txt"
+    one.write_text("x", encoding="utf-8")
+    two = tmp_path / "two.txt"
+    two.write_text("x", encoding="utf-8")
+    first = manager.stage(operation="delete_path", description="d", source=one)
+    second = manager.stage(operation="delete_path", description="d", source=two)
+    assert first.token != second.token
+    assert len(manager.pending()) == 2
+
+
+def test_stage_same_path_but_new_operation_issues_a_new_token(tmp_path) -> None:
+    # A recycle confirmation must never double as a permanent-delete
+    # confirmation for the same path: the operations differ, so each needs
+    # its own staging and its own code.
+    manager = ConfirmationManager()
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+    recycle = manager.stage(
+        operation="delete_path", description="recycle it", source=source
+    )
+    permanent = manager.stage(
+        operation="permanent_delete", description="purge it", source=source
+    )
+    assert recycle.token != permanent.token
+    assert len(manager.pending()) == 2
+
+
+def test_stage_after_withdrawal_issues_a_fresh_token(tmp_path) -> None:
+    # Security still demands a genuinely fresh staging after a cancel:
+    # dedupe must never resurrect a withdrawn confirmation.
+    manager = ConfirmationManager()
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+    first = manager.stage(operation="delete_path", description="d", source=source)
+    manager.cancel(first.token)
+    second = manager.stage(operation="delete_path", description="d", source=source)
+    assert second.token != first.token
+
+
+def test_stage_after_expiry_issues_a_fresh_token(tmp_path) -> None:
+    manager = ConfirmationManager(ttl_seconds=0.05)
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+    first = manager.stage(operation="delete_path", description="d", source=source)
+    time.sleep(0.15)
+    second = manager.stage(operation="delete_path", description="d", source=source)
+    assert second.token != first.token

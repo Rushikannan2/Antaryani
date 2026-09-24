@@ -307,3 +307,34 @@ def test_routing_section_covers_screenshot_vs_vision() -> None:
     section = _section("# Routing").lower()
     assert "screenshot" in section
     assert "recording" in section
+
+
+# ----------------------------------------------------------------------
+# folder analysis and deletion recovery (TDD pins)
+# ----------------------------------------------------------------------
+def test_open_or_inspect_folder_triggers_an_automatic_analysis() -> None:
+    section = _section("# Windows files")
+    assert "open, inspect, examine, or analyze a folder" in section
+    assert "list_directory" in section
+    assert "inspect_tree" in section
+    assert "summary of what is actually inside" in section
+    assert "Never ask him to describe his own folder" in section
+
+
+def test_folder_analysis_offers_a_deep_dive_of_documents() -> None:
+    section = _section("# Windows files")
+    assert "deep dive" in section
+    assert "read_file" in section
+    assert "Word, PowerPoint, and PDF files" in section
+
+
+def test_staged_confirmation_message_pins_exact_payload() -> None:
+    section = _section("# Windows files")
+    assert "never guess or omit them" in section
+    assert "the code on his screen has not changed" in section
+
+
+def test_failed_delete_retry_keeps_the_existing_confirmation() -> None:
+    section = _section("# Windows files")
+    assert "a failed attempt never mints a new code" in section
+    assert "ask Rushi Sir to close it" in section

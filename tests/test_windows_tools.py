@@ -867,10 +867,12 @@ async def test_delete_folder_tool_passes_recursive_flag(tmp_path) -> None:
     assert "token" in message
     token = message.split("'")[1]
     code = tools._manager.pending()[-1].code
+    # permanent deletion stages as its OWN operation so a recycle approval
+    # for the same path can never unlock the permanent path
     await tools.confirm_windows_action(
         context,
         token=token,
-        operation="delete_path",
+        operation="permanent_delete",
         code=code,
         source=str(folder),
         destination="",
@@ -950,7 +952,7 @@ async def test_delete_empty_folder_permanently_tool(tmp_path) -> None:
     await tools.confirm_windows_action(
         context,
         token=token,
-        operation="delete_path",
+        operation="permanent_delete",
         code=code,
         source=str(folder),
         destination="",
@@ -1079,3 +1081,287 @@ async def test_existing_path_wins_over_recent_matches(tmp_path) -> None:
     # the real file at the resolved path always wins over ambiguity
     result = await tools.get_file_info(context, path="part7-primary.txt")
     assert "alpha" in str(result["path"])
+
+
+# ----------------------------------------------------------------------
+# deletion reliability: stable codes, exact payloads, durable approvals
+# (the "code changes after each attempt" failure loop, fixed)
+# ----------------------------------------------------------------------
+async def test_restage_same_delete_keeps_the_same_code(tmp_path) -> None:
+    tools = WindowsTools()
+    context = make_context()
+    target = tmp_path / "victim.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ToolError) as first:
+        await tools.delete_path(context, path=str(target))
+    first_token = str(first.value).split("'")[1]
+
+    # The model retries (mistyped code, transient tool error): SAME token,
+    # same code on the user's screen, still exactly one pending
+    # confirmation, and nothing executed either time.
+    with pytest.raises(ToolError) as second:
+        await tools.delete_path(context, path=str(target))
+    second_token = str(second.value).split("'")[1]
+    assert second_token == first_token
+    assert len(tools._manager.pending()) == 1
+    assert target.exists()
+
+
+async def test_staged_message_states_the_exact_payload(tmp_path) -> None:
+    # The staging message must TELL the model the exact operation, source,
+    # and destination to confirm - if it has to guess, a mismatched confirm
+    # fails and the model re-stages, churning the code again.
+    tools = WindowsTools()
+    context = make_context()
+    target = tmp_path / "victim.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.delete_path(context, path=str(target))
+    message = str(excinfo.value)
+    resolved = str(target.resolve())
+    assert "operation 'delete_path'" in message
+    assert f"source '{resolved}'" in message
+    assert "destination ''" in message
+    assert "never guesses" in message
+
+
+async def test_failed_execution_keeps_the_approval_for_the_retry(
+    tmp_path, monkeypatch
+) -> None:
+    # A failed attempt (file open in Word, transient lock) must NOT force
+    # the user to read a fresh code: the approval he already gave still
+    # covers the retry of this exact action.
+    import windows_fs
+    from windows_fs import WindowsFSError
+
+    tools = WindowsTools()
+    context = make_context()
+    target = tmp_path / "locked.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.delete_path(context, path=str(target))
+    token = str(excinfo.value).split("'")[1]
+    code = tools._manager.pending()[-1].code
+    await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="delete_path",
+        code=code,
+        source=str(target),
+        destination="",
+    )
+
+    real_recycle = windows_fs.recycle_path
+    calls = {"n": 0}
+
+    def flaky(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise WindowsFSError("ACCESS_DENIED", f"Access denied: {path}")
+        return real_recycle(path)
+
+    monkeypatch.setattr(windows_fs, "recycle_path", flaky)
+
+    # first execution attempt fails: the file is open in another app
+    with pytest.raises(ToolError, match="Access denied"):
+        await tools.delete_path(context, path=str(target))
+    assert target.exists()
+
+    # the approval SURVIVES the failure: the retry runs directly, with no
+    # fresh staging and therefore no new code
+    assert tools._approved is not None
+    assert tools._manager.pending() == ()
+    result = await tools.delete_path(context, path=str(target))
+    assert result["deleted"] is True
+    assert not target.exists()
+    assert tools._approved is None  # released on success
+    assert calls["n"] == 2
+
+
+async def test_unrelated_success_keeps_a_pending_approval(tmp_path) -> None:
+    # Creating a folder (LOW-RISK, runs straight through) must not clear
+    # the approval awaiting a different, already-confirmed action.
+    tools = WindowsTools()
+    context = make_context()
+    target = tmp_path / "victim.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.delete_path(context, path=str(target))
+    token = str(excinfo.value).split("'")[1]
+    code = tools._manager.pending()[-1].code
+    await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="delete_path",
+        code=code,
+        source=str(target),
+        destination="",
+    )
+
+    await tools.create_folder(context, path=str(tmp_path / "scratch"))
+    assert tools._approved is not None
+
+    result = await tools.delete_path(context, path=str(target))
+    assert result["deleted"] is True
+    assert not target.exists()
+
+
+async def test_permanent_delete_stages_as_its_own_operation(tmp_path) -> None:
+    tools = WindowsTools()
+    context = make_context()
+    target = tmp_path / "victim.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.delete_path(context, path=str(target), permanent=True)
+    message = str(excinfo.value)
+    assert "operation 'permanent_delete'" in message
+    pending = tools._manager.pending()[-1]
+    assert pending.operation == "permanent_delete"
+
+    # confirming it as a plain (recycle) delete is a payload mismatch
+    token = message.split("'")[1]
+    with pytest.raises(ToolError, match="does not match the staged operation"):
+        await tools.confirm_windows_action(
+            context,
+            token=token,
+            operation="delete_path",
+            code=pending.code,
+            source=str(target),
+            destination="",
+        )
+    assert target.exists()
+
+
+async def test_recycle_approval_cannot_unlock_permanent_deletion(tmp_path) -> None:
+    # A confirmation for A (recycle) must never execute B (permanent):
+    # the permanent path must stage its own confirmation.
+    tools = WindowsTools()
+    context = make_context()
+    target = tmp_path / "victim.txt"
+    target.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.delete_path(context, path=str(target))
+    token = str(excinfo.value).split("'")[1]
+    code = tools._manager.pending()[-1].code
+    await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="delete_path",
+        code=code,
+        source=str(target),
+        destination="",
+    )
+
+    with pytest.raises(ToolError) as permanent_stage:
+        await tools.delete_path(context, path=str(target), permanent=True)
+    assert "operation 'permanent_delete'" in str(permanent_stage.value)
+    assert target.exists()
+    assert target.read_text(encoding="utf-8") == "x"
+
+
+# ----------------------------------------------------------------------
+# end-to-end deletion across every supported file/folder type
+# ----------------------------------------------------------------------
+async def test_delete_end_to_end_for_all_supported_file_types(tmp_path) -> None:
+    # Videos, Word, PowerPoint, PDFs, images, screenshots, and other files
+    # must all survive the full security flow: stage -> announce -> confirm
+    # with the staged payload -> execute -> verified gone.
+    sample_names = [
+        "clip.mp4",
+        "report.docx",
+        "deck.pptx",
+        "manual.pdf",
+        "photo.jpg",
+        "screenshot_20260924_221500.png",
+        "archive.zip",
+        "notes.txt",
+    ]
+    for name in sample_names:
+        target = tmp_path / name
+        target.write_bytes(b"\x00")
+        tools = WindowsTools()
+        context = make_context()
+
+        with pytest.raises(ToolError) as excinfo:
+            await tools.delete_path(context, path=str(target))
+        message = str(excinfo.value)
+        token = message.split("'")[1]
+        code = tools._manager.pending()[-1].code
+        await tools.confirm_windows_action(
+            context,
+            token=token,
+            operation="delete_path",
+            code=code,
+            source=str(target),
+            destination="",
+        )
+        result = await tools.delete_path(context, path=str(target))
+        assert result["deleted"] is True, name
+        assert not target.exists(), name
+
+
+async def test_permanent_delete_folder_containing_every_supported_type(
+    tmp_path,
+) -> None:
+    import stat
+
+    folder = tmp_path / "OldProject"
+    (folder / "docs").mkdir(parents=True)
+    samples = [
+        folder / "clip.mp4",
+        folder / "report.docx",
+        folder / "deck.pptx",
+        folder / "docs" / "manual.pdf",
+        folder / "docs" / "photo.jpg",
+        folder / "screenshot_20260924_221500.png",
+        folder / "archive.zip",
+        folder / "notes.txt",
+    ]
+    for sample in samples:
+        sample.write_bytes(b"\x00")
+    os.chmod(samples[1], stat.S_IREAD)  # a protected Office file
+
+    tools = WindowsTools()
+    context = make_context()
+    with pytest.raises(ToolError) as excinfo:
+        await tools.delete_path(context, path=str(folder), permanent=True)
+    token = str(excinfo.value).split("'")[1]
+    code = tools._manager.pending()[-1].code
+    await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="permanent_delete",
+        code=code,
+        source=str(folder),
+        destination="",
+    )
+    result = await tools.delete_path(context, path=str(folder), permanent=True)
+    assert result["method"] == "permanent"
+    assert not folder.exists()
+
+
+# ----------------------------------------------------------------------
+# folder inspection: docstrings drive the automatic-analysis workflow
+# ----------------------------------------------------------------------
+def test_open_path_docstring_drives_folder_analysis() -> None:
+    tools = WindowsTools()
+    description = next(
+        tool.info.description for tool in tools.tools if tool.id == "open_path"
+    )
+    assert "list_directory" in description
+    assert "summarize what is inside" in description
+
+
+def test_list_directory_docstring_promotes_proactive_analysis() -> None:
+    tools = WindowsTools()
+    description = next(
+        tool.info.description for tool in tools.tools if tool.id == "list_directory"
+    )
+    assert "summary" in description
+    assert "Never ask him to describe his own folder" in description

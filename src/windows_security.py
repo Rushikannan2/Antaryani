@@ -521,6 +521,27 @@ class ConfirmationManager:
                 "Source and destination are identical; nothing would happen."
             )
 
+        # Reliability: re-staging the SAME still-valid action returns it
+        # unchanged (same token, same six-digit code) instead of minting a
+        # fresh one. Otherwise every model retry replaced the code on the
+        # user's screen while the model still held the old token, so his
+        # read-back could never match ("the code changes after each
+        # attempt"). _purge_expired() already ran, so anything matched
+        # here is genuinely still confirmable; withdrawn or expired
+        # confirmations are gone and are always re-issued fresh.
+        normalized_operation = operation.strip().casefold()
+        source_key = None if resolved_source is None else str(resolved_source)
+        destination_key = (
+            None if resolved_destination is None else str(resolved_destination)
+        )
+        for existing in self._pending.values():
+            if (
+                existing.operation == normalized_operation
+                and existing.source == source_key
+                and existing.destination == destination_key
+            ):
+                return existing
+
         now = datetime.now(timezone.utc)
         pending = PendingConfirmation(
             token=secrets.token_urlsafe(16),

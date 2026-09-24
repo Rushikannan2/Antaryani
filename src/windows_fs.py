@@ -33,6 +33,7 @@ import contextlib
 import fnmatch
 import os
 import shutil
+import stat
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -478,11 +479,36 @@ def _os_rename(src: Path, dst: Path) -> None:
     os.rename(src, dst)
 
 
+def _make_writable(path: Path) -> None:
+    # Windows refuses to delete read-only items outright (files copied
+    # from discs, protected Office documents, locked-down folders);
+    # clearing the flag is what makes deletion of EVERY file type and
+    # folder reliable. Failures here are left for the real delete to
+    # report with its stable error code.
+    with contextlib.suppress(OSError):
+        os.chmod(path, stat.S_IWRITE)
+
+
 def _unlink(path: Path) -> None:
-    path.unlink()
+    try:
+        path.unlink()
+    except PermissionError:
+        # Read-only attribute rather than an ACL: clear it and retry once.
+        # A genuine access denial fails again and still reports
+        # ACCESS_DENIED.
+        _make_writable(path)
+        path.unlink()
 
 
 def _rmtree(path: Path) -> None:
+    # shutil.rmtree fails midway on the FIRST read-only item and leaves a
+    # half-deleted folder behind; clear the flag across the whole tree
+    # first, then remove it in one verified pass.
+    for root, dirs, files in os.walk(path, onerror=lambda _err: None):
+        base = Path(root)
+        for name in (*dirs, *files):
+            _make_writable(base / name)
+    _make_writable(path)
     shutil.rmtree(path)
 
 
@@ -557,8 +583,48 @@ def count_items(path: str | Path, *, cap: int = MAX_BULK_ITEMS + 1) -> int:
 # ----------------------------------------------------------------------
 # listing and searching
 # ----------------------------------------------------------------------
+def _summarize_entries(raw_entries: list[Path]) -> dict[str, object]:
+    """Aggregate counts, sizes, extensions, and recency over ALL entries.
+
+    Runs past the display cap so a truncated listing still yields an
+    accurate analysis (the spoken summary must be right even in a huge
+    folder); stat failures are skipped, exactly like the listing does.
+    """
+    files = 0
+    folders = 0
+    total_size = 0
+    extensions: dict[str, int] = {}
+    newest: list[tuple[float, str]] = []
+    for entry in raw_entries:
+        try:
+            if entry.is_dir():
+                folders += 1
+                continue
+            info = entry.stat()
+        except OSError:
+            continue  # vanished or unreadable between listing and stat-ing
+        files += 1
+        total_size += info.st_size
+        label = entry.suffix.casefold() or "(none)"
+        extensions[label] = extensions.get(label, 0) + 1
+        newest.append((info.st_mtime, entry.name))
+    newest.sort(key=lambda item: item[0], reverse=True)
+    return {
+        "files": files,
+        "folders": folders,
+        "total_size_bytes": total_size,
+        "by_extension": dict(sorted(extensions.items())),
+        "newest_files": [name for _mtime, name in newest[:5]],
+    }
+
+
 def list_directory(path: str | Path) -> dict[str, object]:
-    """List a folder's entries (name, type, size, modified), capped."""
+    """List a folder's entries (name, type, size, modified), capped.
+
+    Also returns a ``summary`` over the WHOLE folder - counts, total
+    size, breakdown by extension, and the newest files - so callers can
+    analyze and describe a folder in one call.
+    """
     resolved = _require_directory(path)
     try:
         raw_entries = _iter_directory(resolved)
@@ -601,6 +667,7 @@ def list_directory(path: str | Path) -> dict[str, object]:
         "path": str(resolved),
         "entries": entries,
         "count": len(entries),
+        "summary": _summarize_entries(raw_entries),
         "truncated": len(raw_entries) > len(entries),
     }
 
@@ -1299,7 +1366,9 @@ def recycle_path(path: str | Path) -> dict[str, object]:
     except PermissionError as exc:
         raise WindowsFSError("ACCESS_DENIED", f"Access denied: {src}") from exc
     except OSError as exc:
-        raise WindowsFSError("OS_ERROR", f"Could not recycle {src}: {exc}") from exc
+        raise WindowsFSError(
+            "OS_ERROR", f"Could not move {src} to the Recycle Bin: {exc}"
+        ) from exc
     if src.exists():
         raise WindowsFSError(
             "VERIFY_FAILED", f"{src} is still present after recycling."
