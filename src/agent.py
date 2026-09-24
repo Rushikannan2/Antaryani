@@ -2,7 +2,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import sys
+import threading
 from collections.abc import Callable, Iterable
 from typing import TextIO
 
@@ -21,9 +23,13 @@ from livekit.agents import (
 from livekit.agents.beta.tools import EndCallTool
 from livekit.plugins import ai_coustics, google
 
+from activity import ActivityLog
 from browser import BrowserManager
 from confirmation import CONFIRMATION_TOPIC
+from dashboard_api import DashboardServices, run_server, start_dashboard_server
 from prompts import AGENT_INSTRUCTIONS
+from session_history import SessionHistory, sanitize_detail
+from system_tools import SystemTools
 from tools import BrowserTools
 from windows_tools import WindowsTools
 
@@ -77,6 +83,9 @@ class Assistant(Agent):
         self,
         browser: BrowserManager | None = None,
         confirmation_publisher: Callable[[dict], None] | None = None,
+        system_tools: SystemTools | None = None,
+        history: SessionHistory | None = None,
+        activity: ActivityLog | None = None,
     ) -> None:
         self.browser = browser or BrowserManager(headless=True)
         self.browser_tools = BrowserTools(
@@ -84,7 +93,15 @@ class Assistant(Agent):
         )
         # Windows filesystem tools (Part 2): one ConfirmationManager per
         # session, held inside this instance.
-        self.windows_tools = WindowsTools(confirmation_publisher=confirmation_publisher)
+        self.windows_tools = WindowsTools(
+            confirmation_publisher=confirmation_publisher,
+            history=history,
+            activity=activity,
+        )
+        self.system_tools = system_tools or SystemTools(
+            history=history,
+            activity=activity,
+        )
         self._end_call_tool = EndCallTool(
             extra_description=(
                 "Only end the call after the user clearly says they are finished, "
@@ -120,11 +137,31 @@ class Assistant(Agent):
                 *self.browser_tools.tools,
                 *self._end_call_tool.tools,
                 *self.windows_tools.tools,
+                *self.system_tools.tools,
             ],
         )
 
 
 server = AgentServer()
+_dashboard_services: DashboardServices | None = None
+_dashboard_runner: object | None = None
+
+
+async def _get_dashboard_services() -> DashboardServices:
+    """Create one local API/runtime shared by this worker process.
+
+    LiveKit may dispatch several jobs on different event loops in one worker.
+    A module-level ``asyncio.Lock`` would bind itself to the first loop and
+    crash later jobs, so startup is intentionally idempotent without one.
+    The localhost bind is non-fatal when another job already owns the port.
+    """
+
+    global _dashboard_runner, _dashboard_services
+    if _dashboard_services is None:
+        _dashboard_services = DashboardServices()
+    if _dashboard_runner is None:
+        _dashboard_runner = await start_dashboard_server(_dashboard_services.app())
+    return _dashboard_services
 
 
 @server.rtc_session(agent_name="my-agent")
@@ -140,8 +177,47 @@ async def my_agent(ctx: JobContext):
         "room": ctx.room.name,
     }
 
+    services = await _get_dashboard_services()
+    session_id = services.history.begin_session()
+    transcript: list[tuple[str, str]] = []
+    session_language: str | None = None
+    history_closed = False
+
+    def finalize_history() -> None:
+        nonlocal history_closed
+        if history_closed:
+            return
+        history_closed = True
+        user_text = [text for role, text in transcript if role == "user"]
+        summary = (
+            "Conversation: " + " | ".join(user_text[-4:])
+            if user_text
+            else "Voice session"
+        )
+        try:
+            services.history.end_session(
+                session_id,
+                status="completed",
+                summary=sanitize_detail(summary),
+                language=session_language,
+            )
+        except Exception:
+            logger.warning("could not persist session history", exc_info=True)
+
+    async def close_history() -> None:
+        finalize_history()
+
+    ctx.add_shutdown_callback(close_history)
+
     browser = BrowserManager(headless=False)
     ctx.add_shutdown_callback(browser.close)
+
+    system_tools = SystemTools(
+        history=services.history,
+        activity=services.activity,
+        recorder=services.recorder,
+        session_id=session_id,
+    )
 
     # Confirmation codes travel only to the user's own screen: a targeted
     # room data message on a dedicated topic, captured at session start and
@@ -200,9 +276,38 @@ async def my_agent(ctx: JobContext):
         # expressive=True,
     )
 
+    def record_transcription(event: object) -> None:
+        nonlocal session_language
+        language = getattr(event, "language", None)
+        if language is not None:
+            session_language = str(language)
+
+    def record_conversation(event: object) -> None:
+        item = getattr(event, "item", None)
+        role = getattr(item, "role", None)
+        text = getattr(item, "text_content", None)
+        if not isinstance(role, str) or not isinstance(text, str) or not text.strip():
+            return
+        clean = sanitize_detail(text)
+        transcript.append((role, clean))
+        try:
+            services.history.add_event(session_id, "conversation", role, clean)
+        except KeyError:
+            logger.debug("conversation arrived after session history closed")
+
+    session.on("user_input_transcribed", record_transcription)
+    session.on("conversation_item_added", record_conversation)
+    session.on("close", lambda _event: finalize_history())
+
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
-        agent=Assistant(browser, confirmation_publisher=publish_confirmation),
+        agent=Assistant(
+            browser,
+            confirmation_publisher=publish_confirmation,
+            system_tools=system_tools,
+            history=services.history,
+            activity=services.activity,
+        ),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             video_input=True,
@@ -221,4 +326,14 @@ async def my_agent(ctx: JobContext):
 
 
 if __name__ == "__main__":
+    if os.environ.get("SRILATHA_DASHBOARD_AUTOSTART", "1").casefold() not in {
+        "0",
+        "false",
+        "no",
+    }:
+        threading.Thread(
+            target=run_server,
+            name="srilatha-dashboard-api",
+            daemon=True,
+        ).start()
     cli.run_app(server)

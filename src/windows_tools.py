@@ -36,7 +36,9 @@ from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
 import windows_fs
+from activity import ActivityLog
 from confirmation import announce_confirmation
+from session_history import SessionHistory
 from windows_fs import WindowsFSError
 from windows_security import (
     CONFIRMATION_TTL_SECONDS,
@@ -54,9 +56,14 @@ class WindowsTools:
     """The Windows filesystem tools plus confirm and cancel helpers."""
 
     def __init__(
-        self, confirmation_publisher: Callable[[dict], None] | None = None
+        self,
+        confirmation_publisher: Callable[[dict], None] | None = None,
+        history: SessionHistory | None = None,
+        activity: ActivityLog | None = None,
     ) -> None:
         self._confirmation_publisher = confirmation_publisher
+        self.history = history
+        self.activity = activity or (ActivityLog(history=history) if history else None)
         self._manager = ConfirmationManager()
         # The user's last approval: (operation, source, destination).
         # Consumed by the next exactly-matching gated call; expires.
@@ -158,6 +165,10 @@ class WindowsTools:
             self._last_file = str(candidate)
             self._context_dir = str(candidate.parent)
 
+    def _record(self, kind: str, status: str, detail: object) -> None:
+        if self.activity is not None:
+            self.activity.record(kind, status, detail)
+
     # ------------------------------------------------------------------
     # confirmation gate
     # ------------------------------------------------------------------
@@ -228,6 +239,7 @@ class WindowsTools:
             destination=pending.destination,
             expires_in=CONFIRMATION_TTL_SECONDS,
         )
+        self._record("confirmation", "required", description)
         raise ToolError(
             f"Staged for user confirmation: token '{pending.token}'. "
             f"Explain exactly what will happen ({description}) and ask the "
@@ -427,6 +439,7 @@ class WindowsTools:
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
+        self._record("file", "ok", f"Created {result['path']}")
         return result
 
     @function_tool()
@@ -451,6 +464,7 @@ class WindowsTools:
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
+        self._record("file", "ok", f"Created folder {result['path']}")
         return result
 
     @function_tool()
@@ -515,6 +529,7 @@ class WindowsTools:
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
+        self._record("file", "ok", f"Edited {result['path']}")
         return result
 
     # ------------------------------------------------------------------
@@ -549,6 +564,7 @@ class WindowsTools:
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["to"])
+        self._record("file", "ok", f"Renamed {src.name} to {result['to']}")
         return result
 
     @function_tool()
@@ -584,6 +600,7 @@ class WindowsTools:
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["to"])
+        self._record("file", "ok", f"Moved {src.name} to {final}")
         return result
 
     @function_tool()
@@ -632,6 +649,7 @@ class WindowsTools:
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["to"])
+        self._record("file", "ok", f"Copied {src.name} to {result['to']}")
         return result
 
     # ------------------------------------------------------------------
@@ -662,6 +680,7 @@ class WindowsTools:
             result = await asyncio.to_thread(windows_fs.recycle_path, str(src))
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
+        self._record("file", "ok", f"Recycled {src.name}")
         return result
 
     @function_tool()
@@ -711,6 +730,7 @@ class WindowsTools:
                 }
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
+        self._record("file", "ok", f"Deleted {src.name}")
         return result
 
     # ------------------------------------------------------------------
@@ -734,6 +754,7 @@ class WindowsTools:
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
+        self._record("file", "ok", f"Opened {result['path']}")
         return result
 
     @function_tool()
@@ -755,6 +776,9 @@ class WindowsTools:
             result = await asyncio.to_thread(windows_fs.launch_application, application)
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
+        self._record(
+            "application", "ok", f"Opened {result.get('application', application)}"
+        )
         return result
 
     # ------------------------------------------------------------------

@@ -266,3 +266,44 @@ def test_windows_files_names_the_full_launch_allowlist() -> None:
     assert "edge" in section
     assert "vs code" in section
     assert "launch_application" in section
+
+
+def test_prompt_routes_screen_capture_recording_and_system_status() -> None:
+    # The dashboard-era Srilatha must know its three new capabilities.
+    section = _section("# Screen capture").lower()
+    assert "take_system_screenshot" in section
+    assert "control_screen_recording" in section
+    assert "get_system_status" in section
+
+
+def test_prompt_distinguishes_screen_screenshot_from_page_screenshot() -> None:
+    # "Take a screenshot" saves a real file of the desktop; the browser's
+    # take_screenshot only images a webpage into context. Never conflate.
+    section = _section("# Screen capture").lower()
+    assert "take_screenshot" in section
+    assert "webpage" in section or "page" in section
+
+
+def test_prompt_guards_recording_stop_words() -> None:
+    # A casual "stop" in normal conversation must never stop a recording,
+    # and an active recording must respond to the natural verbs.
+    section = _section("# Screen capture").lower()
+    assert "casual" in section or "conversation" in section
+    assert "stop" in section
+    assert "pause" in section
+    assert "resume" in section
+
+
+def test_prompt_offers_real_system_status_commands() -> None:
+    section = _section("# Screen capture").lower()
+    assert "battery" in section
+    assert "ram" in section
+    assert "cpu" in section
+    assert "storage" in section
+    assert "never invent" in section or "not invent" in section
+
+
+def test_routing_section_covers_screenshot_vs_vision() -> None:
+    section = _section("# Routing").lower()
+    assert "screenshot" in section
+    assert "recording" in section

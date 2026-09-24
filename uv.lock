@@ -17,9 +17,12 @@ name = "agent-starter-python"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "livekit-agents", extra = ["google", "images"] },
     { name = "livekit-plugins-ai-coustics" },
+    { name = "pillow" },
     { name = "playwright" },
+    { name = "psutil" },
     { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "send2trash" },
@@ -34,9 +37,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.14.0" },
     { name = "livekit-agents", extras = ["google", "images"], specifier = "~=1.8" },
     { name = "livekit-plugins-ai-coustics", specifier = "~=0.3" },
+    { name = "pillow", specifier = ">=12.0.0" },
     { name = "playwright", specifier = ">=1.63.0" },
+    { name = "psutil", specifier = ">=7.0.0" },
     { name = "pypdf", specifier = ">=6.19.0" },
     { name = "python-dotenv" },
     { name = "send2trash", specifier = ">=2.1.0" },

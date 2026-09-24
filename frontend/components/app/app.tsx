@@ -43,10 +43,14 @@ export function App({ tokenServerId, tokenEndpoint, agentName, isVideoInputSuppo
     <AgentSessionProvider session={session}>
       <AppSetup />
       <ConfirmationBanner />
-      <main className="grid h-svh grid-cols-1 place-content-center">
+      <main className="min-h-svh">
         <ViewController isVideoInputSupported={isVideoInputSupported} />
       </main>
-      <StartAudioButton label="Start Audio" />
+      <StartAudioButton
+        label="Enable microphone audio"
+        size="sm"
+        className="fixed right-4 bottom-4 z-40 rounded-full shadow-lg"
+      />
       <Toaster
         icons={{
           warning: <WarningIcon weight="bold" />,

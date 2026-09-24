@@ -86,6 +86,15 @@ export function ConfirmationBanner() {
     }
   }, [pending, now]);
 
+  React.useEffect(() => {
+    window.dispatchEvent(
+      new CustomEvent('srilatha:confirmation', { detail: { active: pending !== null } })
+    );
+    return () => {
+      window.dispatchEvent(new CustomEvent('srilatha:confirmation', { detail: { active: false } }));
+    };
+  }, [pending]);
+
   if (!pending) {
     return null;
   }
