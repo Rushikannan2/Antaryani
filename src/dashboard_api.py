@@ -62,7 +62,14 @@ def _response(value: Any, *, status: int = 200) -> web.Response:
 
 
 async def _call(function: Callable[..., Any], *args: Any) -> Any:
-    result = function(*args)
+    """Run a provider off the event loop.
+
+    Metrics providers use blocking work (psutil sampling sleeps, NVML calls)
+    that must never delay audio or turn handling on the agent loop.
+    """
+    if inspect.iscoroutinefunction(function):
+        return await function(*args)
+    result = await asyncio.to_thread(function, *args)
     if inspect.isawaitable(result):
         return await result
     return result
@@ -168,7 +175,7 @@ def create_app(
             )
 
     async def recording_get(_: web.Request) -> web.Response:
-        return _response(manager.status())
+        return _response(await asyncio.to_thread(manager.status))
 
     async def recording_post(request: web.Request) -> web.Response:
         payload = await _body(request)
@@ -199,7 +206,7 @@ def create_app(
                 {"ok": False, "error": "RECORDING_FAILED", "detail": str(exc)},
                 status=500,
             )
-        status = manager.status()
+        status = await asyncio.to_thread(manager.status)
         state = status.get("state")
         state_value = state.value if isinstance(state, RecordingState) else str(state)
         if action in {"start", "pause", "resume"}:
@@ -268,15 +275,15 @@ def create_app(
             limit = max(1, min(int(request.query.get("limit", "50")), 200))
         except ValueError:
             limit = 50
-        return _response({"activity": feed.recent(limit=limit)})
+        return _response({"activity": await asyncio.to_thread(feed.recent, limit)})
 
     async def dashboard(_: web.Request) -> web.Response:
         return _response(
             {
                 "system": await _call(metrics),
-                "recording": manager.status(),
-                "sessions": store.list_sessions(limit=30),
-                "activity": feed.recent(limit=30),
+                "recording": await asyncio.to_thread(manager.status),
+                "sessions": await asyncio.to_thread(store.list_sessions, 30),
+                "activity": await asyncio.to_thread(feed.recent, 30),
             }
         )
 

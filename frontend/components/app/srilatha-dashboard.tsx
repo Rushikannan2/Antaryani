@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   BatteryCharging,
@@ -21,7 +21,6 @@ import {
   LockKeyhole,
   Mic,
   Monitor,
-  Moon,
   Pause,
   Play,
   Radio,
@@ -30,7 +29,8 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
-  Sun,
+  Video,
+  VideoOff,
   Wifi,
   WifiOff,
   X,
@@ -296,7 +296,9 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
   const agent = useAgent();
   const { messages } = useSessionMessages(session);
   const { send } = useChat();
-  const { isScreenShareEnabled } = useLocalParticipant();
+  const { isScreenShareEnabled, localParticipant, cameraTrack, isCameraEnabled } =
+    useLocalParticipant();
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [metrics, setMetrics] = useState<SystemMetrics | null>(null);
   const [recording, setRecording] = useState<RecordingStatus>({
     state: 'idle',
@@ -313,8 +315,6 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
   const [now, setNow] = useState(() => new Date());
   const [text, setText] = useState('');
   const [isCameraOn, setIsCameraOn] = useState<boolean | null>(null);
-  const { isConnected } = useSessionContext();
-  const localParticipant = useLocalParticipant();
 
   const loadSystem = useCallback(async () => {
     try {
@@ -351,34 +351,39 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
   }, []);
 
   useEffect(() => {
+    // Back off polling while the local dashboard API is unreachable so the
+    // Next.js proxy does not spam connection errors while the agent restarts.
+    const offline = backendOnline === false;
     void loadSystem();
     void loadRecording();
     void loadHistory();
-    const systemTimer = window.setInterval(() => void loadSystem(), 10_000);
-    const recordingTimer = window.setInterval(() => void loadRecording(), 1_000);
-    const historyTimer = window.setInterval(() => void loadHistory(), 5_000);
+    const systemTimer = window.setInterval(() => void loadSystem(), offline ? 30_000 : 10_000);
+    const recordingTimer = window.setInterval(() => void loadRecording(), offline ? 5_000 : 1_000);
+    const historyTimer = window.setInterval(() => void loadHistory(), offline ? 15_000 : 5_000);
     return () => {
       window.clearInterval(systemTimer);
       window.clearInterval(recordingTimer);
       window.clearInterval(historyTimer);
     };
-  }, [loadHistory, loadRecording, loadSystem]);
+  }, [loadHistory, loadRecording, loadSystem, backendOnline]);
 
+  // Keep the camera state truthful even if the track changes elsewhere
+  // (control bar, device errors, or disconnect auto-disable).
   useEffect(() => {
-    // Set up local video preview when camera is enabled and session is connected
-    if (isCameraOn === true && isConnected) {
-      // Access the local camera track from the LiveKit session
-      const track = localParticipant?.cameraTrack;
-      if (track && track.track) {
-        const videoElement = document.createElement('video');
-        videoElement.autoplay = true;
-        videoElement.playsInline = true;
-        // Create a stream from the track
-        const stream = new MediaStream([track.track as unknown as MediaStreamTrack]);
-      }
-    } else {
-    }
-  }, [isCameraOn, isConnected, localParticipant?.cameraTrack]);
+    setIsCameraOn(isCameraEnabled);
+  }, [isCameraEnabled]);
+
+  // Attach the local camera track to the self-view preview element.
+  useEffect(() => {
+    const video = videoRef.current;
+    const track = cameraTrack?.track;
+    if (!video || !track) return;
+    video.muted = true;
+    track.attach(video);
+    return () => {
+      track.detach(video);
+    };
+  }, [cameraTrack?.track]);
 
   useEffect(() => {
     const clock = window.setInterval(() => setNow(new Date()), 1_000);
@@ -441,14 +446,12 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
 
   async function toggleCamera() {
     if (!session.isConnected) return;
-    setIsCameraOn((prev) => {
-      const next = !prev;
-      // Use the LiveKit session's track subscription to enable/disable camera
-      // The AgentSession from @livekit/components-react handles this
-      // We'll update the UI state and let the session handle the actual track
-      return next;
+    await runAction('camera', async () => {
+      const enable = !isCameraOn;
+      await localParticipant.setCameraEnabled(enable);
+      setIsCameraOn(enable);
+      setNotice(enable ? 'Camera on — your live self-view is now visible.' : 'Camera turned off.');
     });
-    setNotice(`Camera ${isCameraOn ? 'turned off' : 'turned on'}.`);
   }
 
   async function recordingAction(action: 'start' | 'pause' | 'resume' | 'stop') {
@@ -564,17 +567,6 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
               </p>
             </div>
 
-            {/* Camera preview */}
-            <div className="flex items-center gap-2 sm:hidden">
-              {isCameraOn === true ? (
-                <Moon className="text-primary size-3.5" />
-              ) : isCameraOn === false ? (
-                <Sun className="text-muted-foreground size-3.5" />
-              ) : (
-                <Sun className="text-muted-foreground size-3.5 opacity-50" />
-              )}
-            </div>
-
             {/* Confirmation and theme */}
             <div className="flex items-center gap-2">
               {confirmationRequired ? (
@@ -588,30 +580,6 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
             </div>
 
             <ThemeToggle />
-            {/* Camera toggle */}
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              aria-label={
-                isCameraOn !== null
-                  ? isCameraOn
-                    ? 'Turn off camera'
-                    : 'Turn on camera'
-                  : 'Turn on camera'
-              }
-              onClick={toggleCamera}
-              className="flex hidden h-8 w-8 items-center justify-center rounded-md sm:flex"
-              title={isCameraOn !== null ? (isCameraOn ? 'Camera off' : 'Camera on') : 'Camera on'}
-            >
-              {isCameraOn === true ? (
-                <Moon className="size-3.5" />
-              ) : isCameraOn === false ? (
-                <Sun className="size-3.5" />
-              ) : (
-                <Sun className="size-3.5" />
-              )}
-            </Button>
           </div>
         </header>
 
@@ -687,6 +655,40 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
                   <Button className="mt-5 rounded-full px-6" onClick={() => void session.start()}>
                     <Mic className="size-4" /> Start call
                   </Button>
+                ) : null}
+                {session.isConnected ? (
+                  <div
+                    aria-label={
+                      isCameraOn === true ? 'Camera preview: live' : 'Camera preview: off'
+                    }
+                    className="border-primary/40 absolute top-3 right-3 w-32 overflow-hidden rounded-xl border bg-slate-950 shadow-lg sm:w-44"
+                  >
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className={cn(
+                        'aspect-video w-full -scale-x-100 bg-slate-950 object-cover',
+                        isCameraOn !== true && 'hidden'
+                      )}
+                    />
+                    {isCameraOn === true ? (
+                      <div className="absolute top-1.5 left-1.5 flex items-center gap-1.5 rounded-full bg-black/65 px-2 py-0.5">
+                        <span className="size-1.5 animate-pulse rounded-full bg-red-500" />
+                        <span className="text-[9px] font-bold tracking-[0.14em] text-white uppercase">
+                          Live
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex aspect-video w-full flex-col items-center justify-center gap-1.5 bg-slate-950">
+                        <VideoOff className="size-5 text-slate-400" />
+                        <span className="text-[9px] font-bold tracking-[0.14em] text-slate-400 uppercase">
+                          Camera off
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 ) : null}
               </div>
 
@@ -794,27 +796,27 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
                     >
                       <Zap className="size-4" />
                     </Button>
-                    {/* Camera toggle button */}
+                    {/* Camera ON/OFF toggle with live self-view */}
                     <Button
                       type="button"
-                      variant="outline"
+                      variant={isCameraOn === true ? 'default' : 'outline'}
                       size="icon"
-                      aria-label={
-                        isCameraOn !== null
-                          ? isCameraOn
-                            ? 'Turn off camera'
-                            : 'Turn on camera'
-                          : 'Turn on camera'
+                      aria-label={isCameraOn === true ? 'Turn off camera' : 'Turn on camera'}
+                      aria-pressed={isCameraOn === true}
+                      title={
+                        !isVideoInputSupported
+                          ? 'No camera detected'
+                          : isCameraOn === true
+                            ? 'Camera on — click to turn off'
+                            : 'Camera off — click to turn on'
                       }
-                      onClick={toggleCamera}
-                      disabled={busyAction === 'camera'}
+                      onClick={() => void toggleCamera()}
+                      disabled={busyAction === 'camera' || !isVideoInputSupported}
                     >
                       {isCameraOn === true ? (
-                        <Moon className="size-4" />
-                      ) : isCameraOn === false ? (
-                        <Sun className="size-4" />
+                        <Video className="size-4" />
                       ) : (
-                        <Sun className="size-4" />
+                        <VideoOff className="size-4" />
                       )}
                     </Button>
                   </form>
@@ -823,7 +825,8 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
                       controls={{
                         leave: true,
                         microphone: true,
-                        camera: isCameraOn ?? false,
+                        // Camera ON/OFF lives beside the chat input as the single control.
+                        camera: false,
                         screenShare: isVideoInputSupported,
                         chat: true,
                       }}
@@ -853,6 +856,13 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
                   </Button>
                 }
               />
+              {backendOnline === false ? (
+                <div className="mb-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-500">
+                  Dashboard API offline — start the agent with{' '}
+                  <code className="font-mono font-semibold">lk agent dev</code> to stream live
+                  metrics.
+                </div>
+              ) : null}
               <div className="grid grid-cols-2 gap-3">
                 <MetricCard
                   icon={Cpu}

@@ -9,11 +9,10 @@ interface ThemeToggleProps {
 }
 
 export function ThemeToggle({ className }: ThemeToggleProps) {
-  const { theme, setTheme, resolvedTheme } = useTheme();
+  const { setTheme, resolvedTheme } = useTheme();
 
   // Determine which icon to show based on current theme
   const isDark = resolvedTheme === 'dark';
-  const isLight = resolvedTheme === 'light';
   const isSystem = resolvedTheme === 'system';
 
   return (
