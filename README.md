@@ -190,13 +190,32 @@ uv run python src/dashboard_api.py
 
 Set `SRILATHA_DASHBOARD_PORT` to choose another local port. The API is bound to localhost; it never forwards LiveKit, Gemini, or Windows credentials to the browser. Session history is stored locally in the Srilatha SQLite profile and is sanitized before it is written.
 
+### Troubleshooting
+
+**Frontend build fails with `ENOENT: ... frontend/.next/...` (missing `app-build-manifest.json`, Browserslist data, etc.)** — a `pnpm dev` server (Turbopack) is writing to the same `frontend/.next` directory that `pnpm build` is trying to write. Stop the dev server, clear the stale output, then build cleanly:
+
+```console
+# stop `pnpm dev` first (Ctrl+C in its terminal)
+Remove-Item -Recurse -Force frontend\.next
+cd frontend
+pnpm build
+```
+
+Never run `pnpm build` while `pnpm dev` is running.
+
+**`ECONNREFUSED` on `/api/dashboard/*`** — the local dashboard API on `127.0.0.1:8787` is not up. It autostarts at worker boot; for frontend-only work start it directly with `uv run python src/dashboard_api.py`.
+
+**`The room connection was not established within 10 seconds after calling job_entry`** — the entrypoint calls `ctx.connect()` right after local prep and *before* `AgentSession.start()` (pinned by `tests/test_agent_entrypoint.py`), so on a healthy network the connection is established well inside the 10-second window. If the warning still appears, the room connection itself is slow — usually `wait_pc_connection timed out`, meaning ICE/UDP is being blocked (corporate firewall, VPN, UDP-restricted network) or the LiveKit Cloud region is far away. Those are network-environment issues, not agent bugs: confirm UDP is allowed and retry.
+
+Other start-up log lines — `ssl.create_default_context` blocking, `ai_coustics` FFI initialization, `build_legacy_openai_schema` deprecation, and `no sample` audio warmup — come from the LiveKit, audio, and browser dependencies and are harmless.
+
 ---
 
 ## Testing and quality
 
 | Layer | Command | Coverage |
 |---|---|---|
-| **Unit & behaviour tests** | `uv run pytest` | **515 passed, 1 skipped** — resolution, security policy, confirmation flow, every tool, metrics sanitization, the recorder state machine, the dashboard API, and boot-time dashboard autostart |
+| **Unit & behaviour tests** | `uv run pytest` | **516 passed, 1 skipped** — resolution, security policy, confirmation flow, every tool, metrics sanitization, the recorder state machine, the dashboard API, boot-time dashboard autostart, and the room-connect-before-session-start ordering |
 | **Lint & format** | `uv run ruff check .` · `uv run ruff format --check .` | Clean |
 | **Conversation simulations** | `lk agent simulate --scenarios scenarios.yaml` | Multi-turn dialogues judged end-to-end ([scenarios.yaml](scenarios.yaml)) |
 | **CI** | GitHub Actions | `ruff.yml` on pushes · `simulations.yml` on merges to `main` |
@@ -231,7 +250,7 @@ Antaryani/
 │   ├── safe_files.py       # collision-free artifact naming
 │   └── __init__.py
 ├── frontend/               # Next.js Srilatha command center
-├── tests/                  # 511 pytest checks
+├── tests/                  # 516 pytest checks
 ├── scenarios.yaml          # conversation simulations
 ├── Dockerfile              # production deployment
 ├── .env.example            # environment template (real keys stay local)
@@ -248,7 +267,7 @@ A production-ready [Dockerfile](Dockerfile) is included. Deploy to LiveKit Cloud
 
 ## Attribution
 
-Srilatha was developed by Rushikannan2 as a personal voice-driven Windows AI assistant.
+Srilatha was developed by V T Rushikannan as a personal voice-driven Windows AI assistant.
 
 The project is built on the LiveKit agent-starter-python template. LiveKit provides the underlying agent framework/infrastructure; the Srilatha-specific Windows computer-control layer, security and confirmation model, browser automation, multilingual butler behavior, testing, and application logic were developed for this project.
 

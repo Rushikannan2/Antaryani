@@ -136,12 +136,18 @@ async function apiPost<T>(path: string, body: object): Promise<T> {
   );
 }
 
+// The header clock and every formatted timestamp render on both the server and
+// the client, so they must not depend on the ambient locale (Node defaults to
+// en-US -> "04:46 PM", a browser set to en-IN -> "04:46 pm", which breaks
+// hydration). One explicit locale keeps server and client output identical.
+const CLOCK_LOCALE = 'en-US';
+
 function formatTime(value?: string | null) {
   if (!value) return '—';
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? value
-    : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    : date.toLocaleTimeString(CLOCK_LOCALE, { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 
 function formatDate(value?: string | null) {
@@ -149,7 +155,11 @@ function formatDate(value?: string | null) {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? value
-    : date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    : date.toLocaleDateString(CLOCK_LOCALE, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
 }
 
 function formatDuration(seconds?: number | null) {
@@ -413,11 +423,16 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
     busyAction !== null,
     confirmationRequired
   );
-  const displayTime =
-    metrics?.time?.time || now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const displayDate =
-    metrics?.time?.date ||
-    now.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+  const displayTime = now.toLocaleTimeString(CLOCK_LOCALE, {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+  const displayDate = now.toLocaleDateString(CLOCK_LOCALE, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
   const statusLabel =
     backendOnline === false ? 'OFFLINE' : session.isConnected ? 'ONLINE' : 'READY';
   const statusColor =
@@ -557,12 +572,19 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
               </span>
             </div>
 
-            {/* Time and date */}
+            {/* Time and date: suppressHydrationWarning because the live clock can
+                tick between the server render and client hydration. */}
             <div className="hidden items-center gap-2 sm:flex">
-              <p className="text-primary font-mono text-sm font-semibold tracking-wide">
+              <p
+                suppressHydrationWarning
+                className="text-primary font-mono text-sm font-semibold tracking-wide"
+              >
                 {displayTime}
               </p>
-              <p className="text-muted-foreground text-[10px] font-bold tracking-[0.12em] uppercase">
+              <p
+                suppressHydrationWarning
+                className="text-muted-foreground text-[10px] font-bold tracking-[0.12em] uppercase"
+              >
                 {displayDate}
               </p>
             </div>

@@ -344,6 +344,14 @@ async def my_agent(ctx: JobContext):
     session.on("conversation_item_added", record_conversation)
     session.on("close", lambda _event: finalize_history())
 
+    # Join the room first: the job runner warns if the room connection is not
+    # established within 10 seconds of job entry, and AgentSession.start() can
+    # spend several seconds on RoomIO and noise-cancellation setup before it
+    # schedules its own internal connect(). Connecting here — after all local
+    # prep but before the session starts — gives the connection the full window.
+    # JobContext.connect() is idempotent, so the session's internal call no-ops.
+    await ctx.connect()
+
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
         agent=Assistant(
@@ -364,8 +372,6 @@ async def my_agent(ctx: JobContext):
         ),
     )
 
-    # Join the room and connect to the user
-    await ctx.connect()
     # Session-start identities: confirmation codes go only to these devices.
     identities.extend(ctx.room.remote_participants)
 
