@@ -66,7 +66,7 @@ Paths, arguments, scripts, and unknown programs are refused outright (`UNKNOWN_A
 
 The frontend is a full **Srilatha Personal AI Assistant** dashboard, not just a talk button: live CPU/RAM/GPU/storage/battery/network cards, screenshot and recording controls, recent sessions from the local SQLite history, a sanitized activity feed, quick actions, and the security-status indicator — all wrapped around the voice session.
 
-- Everything on it is **real**: panels poll a local aiohttp API the agent serves on `127.0.0.1:8787`, reached through a same-origin `/api/dashboard` rewrite (localhost only — no CORS, no secrets), backed by the *same* services the voice tools use: one source of truth, no mock data.
+- Everything on it is **real**: panels poll a local aiohttp API the agent serves on `127.0.0.1:8787`, reached through a same-origin `/api/dashboard` proxy route (localhost only — no CORS, no secrets; a stopped agent yields a clean JSON 503 instead of a crash), backed by the *same* services the voice tools use: one source of truth, no mock data.
 - The confirmation banner's presence mirrors to the dashboard as an on/off indicator only; the six-digit code itself never leaves your screen and is never written to localStorage.
 
 The local dashboard also exposes real, verified capture controls:
@@ -190,7 +190,7 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000) — the voice session and the personal dashboard share the page, and the panels light up once the agent is running.
 
-The agent process serves the local dashboard API on `127.0.0.1:8787` from worker boot — before the first call — and Next.js rewrites `/api/dashboard/*` to it. Set `SRILATHA_DASHBOARD_AUTOSTART=0` to disable the boot-time server, or run the API separately for dashboard development:
+The agent process serves the local dashboard API on `127.0.0.1:8787` from worker boot — before the first call — and Next.js proxies `/api/dashboard/*` to it through `frontend/app/api/dashboard/[...path]/route.ts`, which answers a clean JSON 503 while the API is down. Set `SRILATHA_DASHBOARD_AUTOSTART=0` to disable the boot-time server, or run the API separately for dashboard development:
 
 ```console
 uv run python src/dashboard_api.py
@@ -211,7 +211,7 @@ pnpm build
 
 Never run `pnpm build` while `pnpm dev` is running.
 
-**`ECONNREFUSED` on `/api/dashboard/*`** — the local dashboard API on `127.0.0.1:8787` is not up. It autostarts at worker boot; for frontend-only work start it directly with `uv run python src/dashboard_api.py`.
+**Amber “Dashboard API offline” banner / JSON 503 on `/api/dashboard/*` (once: raw `ECONNREFUSED`)** — the local dashboard API on `127.0.0.1:8787` is not up yet (the agent is stopped or still booting). The frontend proxy converts this to a clean JSON 503 with `Retry-After` — no stack traces — the dashboard shows its offline banner and slows its polling, then recovers automatically when the API returns. The API autostarts at worker boot; for frontend-only work start it directly with `uv run python src/dashboard_api.py`.
 
 **`SyntaxError: Unexpected end of JSON input` from `POST /api/token`** — the token endpoint now reads the raw request body first: an empty body is valid and simply means "no room configuration" (the route issues a token with defaults), malformed JSON returns `400` instead of crashing, and every error path returns a response. If you still see this on an older checkout, pull the latest code.
 
