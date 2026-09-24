@@ -21,6 +21,7 @@ import {
   LockKeyhole,
   Mic,
   Monitor,
+  Moon,
   Pause,
   Play,
   Radio,
@@ -29,6 +30,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  Sun,
   Wifi,
   WifiOff,
   X,
@@ -310,6 +312,7 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
   const [confirmationRequired, setConfirmationRequired] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const [text, setText] = useState('');
+  const [isCameraOn, setIsCameraOn] = useState<boolean | null>(null);
 
   const loadSystem = useCallback(async () => {
     try {
@@ -418,6 +421,18 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
     });
   }
 
+  async function toggleCamera() {
+    if (!session.isConnected) return;
+    setIsCameraOn((prev) => {
+      const next = !prev;
+      // Use the LiveKit session's track subscription to enable/disable camera
+      // The AgentSession from @livekit/components-react handles this
+      // We'll update the UI state and let the session handle the actual track
+      return next;
+    });
+    setNotice(`Camera ${isCameraOn ? 'turned off' : 'turned on'}.`);
+  }
+
   async function recordingAction(action: 'start' | 'pause' | 'resume' | 'stop') {
     await runAction(`recording-${action}`, async () => {
       if (action === 'start' && (recording.state === 'completed' || recording.state === 'error')) {
@@ -500,44 +515,49 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
       </div>
 
       <div className="relative mx-auto max-w-[1500px] px-4 py-5 sm:px-6 lg:px-10 lg:py-8">
-        <header className="border-border/70 bg-background/75 mb-7 flex flex-wrap items-center justify-between gap-4 rounded-2xl border px-4 py-3 shadow-sm backdrop-blur-xl sm:px-5">
-          <div className="flex items-center gap-3">
-            <div className="from-primary text-primary-foreground shadow-primary/20 flex size-10 items-center justify-center rounded-xl bg-gradient-to-br to-cyan-400 shadow-lg">
-              <Sparkles className="size-5" />
+        <header className="border-border/70 bg-background/80 mb-8 rounded-2xl border border-t px-6 py-4 shadow-sm backdrop-blur-xl">
+          <div className="flex max-w-2xl items-center gap-3">
+            <div className="bg-primary/10 text-primary shadow-primary/20 relative flex size-10 items-center justify-center overflow-hidden rounded-2xl">
+              <Sparkles className="animate-spin-reverse size-5" />
+              <Sparkles className="absolute -top-1 -left-1 size-3 opacity-30" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-semibold tracking-tight">Srilatha</h1>
-                <span className="bg-primary/10 text-primary rounded-full px-2 py-0.5 text-[9px] font-bold tracking-[0.16em] uppercase">
-                  Personal AI
-                </span>
-              </div>
-              <p className="text-muted-foreground text-xs">Computer assistant command center</p>
+              <h1 className="text-lg font-semibold tracking-tight">Srilatha</h1>
+              <p className="text-muted-foreground tracked text-xs uppercase">Personal AI</p>
             </div>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-4">
-            <div className="border-border/70 bg-background/60 hidden items-center gap-2 rounded-xl border px-3 py-2 sm:flex">
-              <span className={cn('size-2 rounded-full', statusColor)} />
-              <span className="text-muted-foreground text-[10px] font-bold tracking-[0.16em] uppercase">
+
+          <div className="flex items-center gap-3">
+            {/* Status dot and label */}
+            <div className="border-border/70 bg-background/60 flex items-center gap-2 rounded-xl border px-3 py-2">
+              <span className={cn('size-2.5 rounded-full', statusColor)} aria-hidden="true" />
+              <span className="text-[10px] font-bold tracking-[0.14em] whitespace-nowrap uppercase">
                 {statusLabel}
               </span>
             </div>
-            <div className="text-right">
-              <p className="font-mono text-sm font-semibold tracking-wide">{displayTime}</p>
-              <p className="text-muted-foreground text-[10px] tracking-wide uppercase">
+
+            {/* Time and date */}
+            <div className="hidden items-center gap-2 sm:flex">
+              <p className="text-primary font-mono text-sm font-semibold tracking-wide">
+                {displayTime}
+              </p>
+              <p className="text-muted-foreground text-[10px] font-bold tracking-[0.12em] uppercase">
                 {displayDate}
               </p>
             </div>
-            <div className="border-border/70 bg-background/60 hidden items-center gap-2 rounded-xl border px-3 py-2 md:flex">
+
+            {/* Confirmation and theme */}
+            <div className="flex items-center gap-2">
               {confirmationRequired ? (
                 <LockKeyhole className="size-3.5 text-amber-400" />
               ) : (
                 <ShieldCheck className="size-3.5 text-emerald-400" />
               )}
-              <span className="text-muted-foreground text-[10px] font-bold tracking-[0.14em] uppercase">
+              <span className="text-[10px] font-bold tracking-[0.12em] whitespace-nowrap uppercase">
                 {confirmationRequired ? 'Confirmation required' : 'Protected'}
               </span>
             </div>
+
             <ThemeToggle />
           </div>
         </header>
@@ -721,13 +741,36 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
                     >
                       <Zap className="size-4" />
                     </Button>
+                    {/* Camera toggle button */}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon"
+                      aria-label={
+                        isCameraOn !== null
+                          ? isCameraOn
+                            ? 'Turn off camera'
+                            : 'Turn on camera'
+                          : 'Turn on camera'
+                      }
+                      onClick={toggleCamera}
+                      disabled={busyAction === 'camera'}
+                    >
+                      {isCameraOn === true ? (
+                        <Moon className="size-4" />
+                      ) : isCameraOn === false ? (
+                        <Sun className="size-4" />
+                      ) : (
+                        <Sun className="size-4" />
+                      )}
+                    </Button>
                   </form>
-                  <div className="mt-3">
+                  <div className="mt-3 flex gap-2">
                     <AgentControlBar
                       controls={{
                         leave: true,
                         microphone: true,
-                        camera: false,
+                        camera: isCameraOn ?? false,
                         screenShare: isVideoInputSupported,
                         chat: true,
                       }}
