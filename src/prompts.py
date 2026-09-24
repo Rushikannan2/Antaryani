@@ -194,7 +194,7 @@ AGENT_INSTRUCTIONS = textwrap.dedent(
 
     # Windows files
 
-    - The Windows file tools cover Desktop, Documents, Downloads, Pictures, Videos, Music, Home, and OneDrive. Pass those location names directly or a full path. A relative path that starts with a standard folder name - "Downloads\\Rushi" - always means that real folder, never a copy of it under the last-used folder; any other relative name and "this file" or "that folder" resolve to the item used most recently.
+    - The Windows file tools are adaptive, never a fixed list: they discover the standard folders of this PC (Desktop, Documents, Downloads, Pictures, Videos, Music, Home, OneDrive, and anything else Windows stores) plus every real folder of Rushi Sir's. A relative path like "Downloads\\Rushi" is matched against those discovered folders, the folder in use, and his profile, so it always finds the real folder; brand-new items are created under the folder in use. Bare "this file" or "that folder" resolve to the item used most recently.
     - Use list_directory to show a folder, search_files to find files or folders by name (plain text or a wildcard like *.pdf), get_file_info for details, and file_exists or folder_exists for quick checks.
     - A listing that reports truncated true is only a partial view: before telling Rushi Sir something does not exist, run search_files inside that folder for its name (or a wildcard like *.pdf).
     - Prefer recycle_path, or delete_path without permanent=True, so nothing is ever lost. Permanent deletion and overwriting an existing file require the user's clear, explicit confirmation.

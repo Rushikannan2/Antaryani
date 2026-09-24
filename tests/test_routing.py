@@ -248,9 +248,10 @@ def test_windows_files_part7_capabilities() -> None:
 
 
 def test_windows_files_truncated_listing_guidance() -> None:
-    # The agent must know that a truncated listing is a partial view and
-    # that a standard-folder prefix always means that real folder.
+    # Resolution must be adaptive (no fixed folder list), and a truncated
+    # listing must trigger search_files before claiming something is absent.
     section = _section("# Windows files").lower()
+    assert "adaptive" in section
+    assert "fixed list" in section
     assert "truncated" in section
     assert "search_files" in section
-    assert "standard folder name" in section

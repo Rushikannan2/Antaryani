@@ -172,18 +172,15 @@ class WindowsFSError(Exception):
 # ----------------------------------------------------------------------
 # known-folder resolution (usernames are never hard-coded)
 # ----------------------------------------------------------------------
-# Per-user "User Shell Folders" registry value names. Windows stores OneDrive
-# KFM redirection here, which is why the registry is the primary source.
-_SHELL_FOLDER_VALUES: dict[str, tuple[str, ...]] = {
-    "desktop": ("{Desktop}",),
-    "documents": ("Personal",),
-    "downloads": (
-        "{374DE290-123F-4565-9164-39C4925E467B}",
-        "{F42EE2D3-909F-4907-8871-4C22FC0BF756}",
-    ),
-    "pictures": ("My Pictures",),
-    "videos": ("My Video", "My Videos"),
-    "music": ("My Music",),
+# Windows registry value names that do not read like the folder users say.
+# Every other standard folder is discovered by enumerating the registry key
+# itself, so a folder this user redirects - now or later - resolves without
+# anyone extending a list.
+_SHELL_VALUE_NAMES: dict[str, str] = {
+    "personal": "documents",
+    "{desktop}": "desktop",
+    "{374de290-123f-4565-9164-39c4925e467b}": "downloads",
+    "{f42ee2d3-909f-4907-8871-4c22fc0bf756}": "downloads",
 }
 _FOLDER_DISPLAY_NAMES: dict[str, str] = {
     "desktop": "Desktop",
@@ -193,19 +190,6 @@ _FOLDER_DISPLAY_NAMES: dict[str, str] = {
     "videos": "Videos",
     "music": "Music",
 }
-KNOWN_FOLDER_NAMES = frozenset(
-    {
-        "desktop",
-        "documents",
-        "downloads",
-        "pictures",
-        "videos",
-        "music",
-        "home",
-        "onedrive",
-    }
-)
-
 _FOLDER_SYNONYMS = {"photos": "pictures", "one drive": "onedrive", "docs": "documents"}
 _LEADING_ARTICLES = ("the ", "my ", "our ")
 # Short-term context references. Bare pronouns resolve to the most recent
@@ -239,70 +223,117 @@ _CONTEXT_FOLDER_PHRASES = frozenset(
 )
 
 
-def _read_shell_folder(value_names: tuple[str, ...]) -> Path | None:
-    """Read a per-user shell folder value from the registry (no shell)."""
+def _strip_folder_phrase(text: str) -> str:
+    """Case-folded folder phrase without articles or ' folder' suffixes."""
+    value = text.strip().casefold()
+    for article in _LEADING_ARTICLES:
+        if value.startswith(article):
+            value = value[len(article) :]
+            break
+    for suffix in (" folder", " directory"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)]
+            break
+    return value
+
+
+def _shell_folder_values() -> dict[str, str]:
+    """Raw per-user ``User Shell Folders`` values (name -> unexpanded path)."""
+    values: dict[str, str] = {}
     try:
         import winreg
     except ImportError:  # pragma: no cover - non-Windows platforms
-        return None
+        return values
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-            for value_name in value_names:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as shell_key:
+            index = 0
+            while True:
                 try:
-                    raw, _kind = winreg.QueryValueEx(key, value_name)
-                except FileNotFoundError:
-                    continue
-                expanded = os.path.expandvars(str(raw))
-                if not expanded or "%" in expanded:
-                    continue  # unresolved variable - fall through to backup
-                candidate = Path(expanded)
-                if candidate.is_absolute():
-                    return candidate.resolve()
+                    name, raw, _kind = winreg.EnumValue(shell_key, index)
+                except OSError:
+                    break
+                index += 1
+                if isinstance(raw, str) and raw:
+                    values[name] = raw
     except OSError:
-        return None
-    return None
+        return {}
+    return values
+
+
+def _shell_folder_map() -> dict[str, Path]:
+    """Every standard folder THIS user actually has, discovered live.
+
+    Enumerates the per-user ``User Shell Folders`` registry wholesale - so
+    any redirected folder qualifies without anyone extending a list - then
+    adds OneDrive and the profile from the environment and seeds the
+    classic display names as a last resort. Keys are normalized phrases.
+    """
+    folders: dict[str, Path] = {}
+
+    def put(key: str, path: Path) -> None:
+        normalized = _strip_folder_phrase(key)
+        if normalized:
+            folders.setdefault(normalized, path)
+
+    for value_name, raw in _shell_folder_values().items():
+        expanded = os.path.expandvars(raw)
+        if not expanded or "%" in expanded:
+            continue  # unresolved variable - fall through to backup
+        candidate = Path(expanded)
+        if not candidate.is_absolute():
+            continue
+        friendly = _SHELL_VALUE_NAMES.get(value_name.casefold(), value_name)
+        put(friendly, candidate)
+        put(value_name, candidate)
+    for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        value = os.environ.get(variable)
+        if value:
+            put("OneDrive", Path(value))
+            break
+    else:
+        put("OneDrive", Path.home() / "OneDrive")
+    put("home", Path.home())
+    for key, display in _FOLDER_DISPLAY_NAMES.items():
+        folders.setdefault(key, Path.home() / display)
+    return folders
 
 
 def resolve_known_folder(name: str) -> Path:
-    """Resolve a standard user folder from the profile itself.
+    """Resolve a standard user folder discovered from this system.
 
-    Reads the per-user ``User Shell Folders`` registry (where Windows records
-    OneDrive redirection) and falls back to environment variables and the
-    user profile - usernames and paths are never hard-coded.
+    Reads every per-user ``User Shell Folders`` registry value (where
+    Windows records redirections such as OneDrive) and falls back to the
+    environment and the profile - usernames, paths, and the set of
+    folders itself are never hard-coded. Speech is forgiven: singular for
+    plural ("download" finds Downloads) as well as articles and synonyms.
     """
     if not isinstance(name, str) or not name.strip():
         raise WindowsFSError("INVALID_NAME", "Say which standard folder you mean.")
-    key = name.strip().casefold()
-    if key not in KNOWN_FOLDER_NAMES:
-        raise WindowsFSError("INVALID_NAME", f"Unknown standard location: {name!r}.")
-    if key == "home":
-        return Path.home().resolve()
-    if key == "onedrive":
-        for variable in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-            value = os.environ.get(variable)
-            if value:
-                return Path(value).resolve()
-        return (Path.home() / "OneDrive").resolve()
-    shell_path = _read_shell_folder(_SHELL_FOLDER_VALUES[key])
-    if shell_path is not None:
-        return shell_path
-    return (Path.home() / _FOLDER_DISPLAY_NAMES[key]).resolve()
+    normalized = _strip_folder_phrase(name)
+    key = _FOLDER_SYNONYMS.get(normalized, normalized)
+    folders = _shell_folder_map()
+    for probe in (key, f"{key}s", key[:-1] if key.endswith("s") else ""):
+        if not probe:
+            continue
+        hit = folders.get(probe)
+        if hit is not None:
+            return hit.resolve()
+    raise WindowsFSError("INVALID_NAME", f"Unknown standard location: {name!r}.")
 
 
 def _match_folder_alias(lowered: str) -> str | None:
-    """Map a natural location phrase to a known-folder name, if any."""
-    text = lowered.strip()
-    for article in _LEADING_ARTICLES:
-        if text.startswith(article):
-            text = text[len(article) :]
-            break
-    for suffix in (" folder", " directory"):
-        if text.endswith(suffix):
-            text = text[: -len(suffix)]
-            break
-    text = _FOLDER_SYNONYMS.get(text, text)
-    return text if text in KNOWN_FOLDER_NAMES else None
+    """Map a natural location phrase to a standard-folder key, if this
+    system actually has such a folder (discovered, never a fixed list)."""
+    normalized = _strip_folder_phrase(lowered)
+    text = _FOLDER_SYNONYMS.get(normalized, normalized)
+    if not text:
+        return None
+    try:
+        resolve_known_folder(text)
+    except WindowsFSError:
+        return None
+    return text
 
 
 def resolve_user_path(
@@ -318,9 +349,12 @@ def resolve_user_path(
     Accepts standard-location names ("Desktop", "my documents", "photos"),
     contextual references ("this file", "that folder", bare "it",
     "previous file", "the folder we created"), quoted or plain absolute
-    paths, and relative names - one starting with a standard folder name
-    (``Downloads\\Rushi``) always means that folder; any other resolves
-    against the last-used directory, falling back to the user's home.
+    paths, and relative names. Resolution is adaptive, never a fixed
+    list: the first segment of a path is matched against the standard
+    folders THIS system reports, then against folders that really exist
+    in the last-used directory or the profile (``Projects\\notes.txt``
+    finds your real Projects folder); only when nothing matches does it
+    join onto the last-used directory, falling back to the user's home.
     The result is only an absolute CANDIDATE: the security policy still
     validates it afterwards.
     """
@@ -361,10 +395,12 @@ def resolve_user_path(
     candidate = Path(value)
     if candidate.is_absolute():
         return value
-    # "Downloads\Rushi": the first segment names a standard folder, so it
-    # means THAT real folder - joining it onto the last-used directory used
-    # to double the segment (...\Downloads\Rushi\Downloads\Rushi) and made
-    # every later reference to the item fail as NOT_FOUND.
+    # Adaptive: match the first segment against THIS system's standard
+    # folders, then against folders that really exist in the last-used
+    # directory or the profile - never a fixed name list. Joining straight
+    # onto the last-used directory used to double the segment
+    # (...\Downloads\Rushi\Downloads\Rushi) and made every later reference
+    # to the item fail as NOT_FOUND.
     segments = [part for part in value.replace("/", "\\").split("\\") if part]
     if segments:
         prefix = _match_folder_alias(segments[0].casefold())
@@ -373,6 +409,11 @@ def resolve_user_path(
             if len(segments) > 1:
                 return str(base.joinpath(*segments[1:]))
             return str(base)
+        if len(segments) > 1:
+            if context_dir and (Path(context_dir) / segments[0]).is_dir():
+                return str(Path(context_dir).joinpath(*segments))
+            if (Path.home() / segments[0]).is_dir():
+                return str(Path.home().joinpath(*segments))
     base = Path(context_dir) if context_dir else Path.home()
     return str(base / value)
 

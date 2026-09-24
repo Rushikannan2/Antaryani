@@ -210,6 +210,43 @@ def test_resolve_plain_relative_still_uses_context(tmp_path) -> None:
     assert resolved == str(tmp_path / "sub" / "file.txt")
 
 
+def test_resolve_profile_folder_via_home_adaptively(monkeypatch, tmp_path) -> None:
+    import windows_fs
+
+    monkeypatch.setattr(windows_fs.Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / "Projects").mkdir()
+    resolved = resolve_user_path("Projects\\doc.txt", context_dir="C:\\stale\\ctx")
+    assert resolved == str(tmp_path / "Projects" / "doc.txt")
+
+
+def test_resolve_adapts_to_shell_folders_discovered_live(tmp_path, monkeypatch) -> None:
+    import windows_fs
+
+    fav = tmp_path / "Faves"
+    fav.mkdir()
+    real = windows_fs._shell_folder_map
+    monkeypatch.setattr(
+        windows_fs, "_shell_folder_map", lambda: {**real(), "favorites": fav}
+    )
+    assert resolve_user_path(
+        "Favorites\\links.txt", context_dir="C:\\stale\\ctx"
+    ) == str(fav / "links.txt")
+    assert resolve_user_path("Favorites", context_dir="C:\\stale\\ctx") == str(fav)
+
+
+def test_resolve_tolerates_singular_folder_speech() -> None:
+    resolved = resolve_user_path("download\\p.txt", context_dir="C:\\stale\\ctx")
+    assert resolved == str(resolve_known_folder("downloads") / "p.txt")
+
+
+def test_resolve_standard_folder_wins_over_context_twin(tmp_path) -> None:
+    # A local folder that merely shares a standard name must not hijack the
+    # reference: real standard folders win, then existing context folders.
+    (tmp_path / "Downloads").mkdir()
+    resolved = resolve_user_path("Downloads\\x", context_dir=str(tmp_path))
+    assert resolved == str(resolve_known_folder("downloads") / "x")
+
+
 # ----------------------------------------------------------------------
 # list_directory
 # ----------------------------------------------------------------------
