@@ -1,7 +1,7 @@
 'use client';
 
 import { useTheme } from 'next-themes';
-import { MonitorIcon, MoonIcon, SunIcon } from '@phosphor-icons/react';
+import { MoonIcon, SunIcon } from '@phosphor-icons/react';
 import { cn } from '@/lib/shadcn/utils';
 
 interface ThemeToggleProps {
@@ -9,51 +9,36 @@ interface ThemeToggleProps {
 }
 
 export function ThemeToggle({ className }: ThemeToggleProps) {
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, resolvedTheme } = useTheme();
+
+  // Determine which icon to show based on current theme
+  const isDark = resolvedTheme === 'dark';
+  const isLight = resolvedTheme === 'light';
+  const isSystem = resolvedTheme === 'system';
 
   return (
     <div
       className={cn(
-        'text-foreground bg-background flex w-full flex-row justify-end divide-x overflow-hidden rounded-full border',
+        'bg-border flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium',
         className
       )}
     >
-      <span className="sr-only">Color scheme toggle</span>
-      <button type="button" onClick={() => setTheme('dark')} className="cursor-pointer p-1 pl-1.5">
-        <span className="sr-only">Enable dark color scheme</span>
-        <MoonIcon
-          suppressHydrationWarning
-          size={16}
-          weight="bold"
-          className={cn(theme !== 'dark' && 'opacity-25')}
-        />
-      </button>
+      <span className="sr-only">Toggle color scheme</span>
       <button
         type="button"
-        onClick={() => setTheme('light')}
-        className="cursor-pointer px-1.5 py-1"
+        onClick={() => setTheme(isDark ? 'light' : 'dark')}
+        className="hover:bg-border/50 flex size-3.5 items-center justify-center rounded-md transition-colors"
+        aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
       >
-        <span className="sr-only">Enable light color scheme</span>
-        <SunIcon
-          suppressHydrationWarning
-          size={16}
-          weight="bold"
-          className={cn(theme !== 'light' && 'opacity-25')}
-        />
+        {isDark ? (
+          <SunIcon size={12} className="text-primary" />
+        ) : (
+          <MoonIcon size={12} className="text-primary" />
+        )}
       </button>
-      <button
-        type="button"
-        onClick={() => setTheme('system')}
-        className="cursor-pointer p-1 pr-1.5"
-      >
-        <span className="sr-only">Enable system color scheme</span>
-        <MonitorIcon
-          suppressHydrationWarning
-          size={16}
-          weight="bold"
-          className={cn(theme !== 'system' && 'opacity-25')}
-        />
-      </button>
+      <span className="truncate text-[10px] opacity-60">
+        {isSystem ? 'System' : isDark ? 'Dark' : 'Light'}
+      </span>
     </div>
   );
 }

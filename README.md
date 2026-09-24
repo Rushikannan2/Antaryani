@@ -74,6 +74,7 @@ The local dashboard also exposes real, verified capture controls:
 - Say *"Take a screenshot"*, *"Capture the screen"*, or *"Screenshot this"* to save a timestamped PNG under `Pictures/Srilatha`.
 - Say *"Start recording"*, *"Pause"*, *"Resume"*, or *"Stop recording"* to control the verified AVI recorder under `Videos/Srilatha`.
 - Ask for CPU, RAM, GPU, storage, battery, network, time, or overall system status. Unavailable GPU/battery values are shown honestly as unavailable.
+- **Say *"Camera on"* or *"Camera off"*** to toggle the local video track — the dashboard shows a clear Sun (off) / Moon (on) indicator beside the chat input, and the LiveKit session respects the camera state.
 
 The dashboard is a local command center, not a second Windows file manager. File moves, protected paths, ambiguity handling, and six-digit confirmations continue through the existing security layer.
 

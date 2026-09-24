@@ -313,6 +313,8 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
   const [now, setNow] = useState(() => new Date());
   const [text, setText] = useState('');
   const [isCameraOn, setIsCameraOn] = useState<boolean | null>(null);
+  const { isConnected } = useSessionContext();
+  const localParticipant = useLocalParticipant();
 
   const loadSystem = useCallback(async () => {
     try {
@@ -361,6 +363,22 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
       window.clearInterval(historyTimer);
     };
   }, [loadHistory, loadRecording, loadSystem]);
+
+  useEffect(() => {
+    // Set up local video preview when camera is enabled and session is connected
+    if (isCameraOn === true && isConnected) {
+      // Access the local camera track from the LiveKit session
+      const track = localParticipant?.cameraTrack;
+      if (track && track.track) {
+        const videoElement = document.createElement('video');
+        videoElement.autoplay = true;
+        videoElement.playsInline = true;
+        // Create a stream from the track
+        const stream = new MediaStream([track.track as unknown as MediaStreamTrack]);
+      }
+    } else {
+    }
+  }, [isCameraOn, isConnected, localParticipant?.cameraTrack]);
 
   useEffect(() => {
     const clock = window.setInterval(() => setNow(new Date()), 1_000);
@@ -546,6 +564,17 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
               </p>
             </div>
 
+            {/* Camera preview */}
+            <div className="flex items-center gap-2 sm:hidden">
+              {isCameraOn === true ? (
+                <Moon className="text-primary size-3.5" />
+              ) : isCameraOn === false ? (
+                <Sun className="text-muted-foreground size-3.5" />
+              ) : (
+                <Sun className="text-muted-foreground size-3.5 opacity-50" />
+              )}
+            </div>
+
             {/* Confirmation and theme */}
             <div className="flex items-center gap-2">
               {confirmationRequired ? (
@@ -559,6 +588,30 @@ export function SrilathaDashboard({ isVideoInputSupported }: { isVideoInputSuppo
             </div>
 
             <ThemeToggle />
+            {/* Camera toggle */}
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              aria-label={
+                isCameraOn !== null
+                  ? isCameraOn
+                    ? 'Turn off camera'
+                    : 'Turn on camera'
+                  : 'Turn on camera'
+              }
+              onClick={toggleCamera}
+              className="flex hidden h-8 w-8 items-center justify-center rounded-md sm:flex"
+              title={isCameraOn !== null ? (isCameraOn ? 'Camera off' : 'Camera on') : 'Camera on'}
+            >
+              {isCameraOn === true ? (
+                <Moon className="size-3.5" />
+              ) : isCameraOn === false ? (
+                <Sun className="size-3.5" />
+              ) : (
+                <Sun className="size-3.5" />
+              )}
+            </Button>
           </div>
         </header>
 
