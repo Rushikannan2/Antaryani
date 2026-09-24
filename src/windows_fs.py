@@ -129,12 +129,27 @@ _APPLICATION_FIXED_PATHS: dict[str, tuple[str, ...]] = {
         r"%ProgramFiles(x86)%\Microsoft Office\root\Office16\EXCEL.EXE",
         r"%ProgramFiles(x86)%\Microsoft Office\Office16\EXCEL.EXE",
     ),
+    # Browsers (launch-only: no URL or arguments can ever be passed).
+    "chrome": (
+        r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+        r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+    ),
+    "edge": (
+        r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+        r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+        r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe",
+    ),
 }
 
 _LAUNCH_ALIASES: dict[str, str] = {
     "code": "vs code",
     "vscode": "vs code",
     "visual studio code": "vs code",
+    "google chrome": "chrome",
+    "chrome browser": "chrome",
+    "microsoft edge": "edge",
+    "ms edge": "edge",
     "microsoft word": "word",
     "ms word": "word",
     "winword": "word",

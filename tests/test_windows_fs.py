@@ -1585,6 +1585,67 @@ def test_office_aliases_resolve_to_fixed_candidates(alias, executable) -> None:
     assert any(candidate.name.upper() == executable for candidate in candidates), alias
 
 
+def test_browser_candidates_come_from_fixed_install_paths() -> None:
+    # Chrome and Edge are allowlisted the safe way - fixed, environment-driven
+    # candidate templates the model never supplies (same as Office).
+    import windows_fs
+
+    expectations = {"chrome": "chrome.exe", "edge": "msedge.exe"}
+    for key, executable in expectations.items():
+        candidates = windows_fs._application_candidates(key)
+        assert candidates, key
+        assert any(
+            candidate.name.casefold() == executable for candidate in candidates
+        ), key
+
+
+@pytest.mark.parametrize(
+    ("alias", "executable"),
+    [
+        ("google chrome", "chrome.exe"),
+        ("chrome browser", "chrome.exe"),
+        ("microsoft edge", "msedge.exe"),
+        ("ms edge", "msedge.exe"),
+    ],
+)
+def test_browser_aliases_resolve_to_fixed_candidates(alias, executable) -> None:
+    import windows_fs
+
+    candidates = windows_fs._application_candidates(alias)
+    assert any(candidate.name.casefold() == executable for candidate in candidates), (
+        alias
+    )
+
+
+def test_unknown_app_message_lists_every_allowed_application() -> None:
+    # The refusal must name the full allowlist so the assistant never
+    # undersells what it can open ("only basic applications like Notepad").
+    with pytest.raises(WindowsFSError) as excinfo:
+        launch_application("hacker-tool")
+    message = str(excinfo.value).casefold()
+    for name in ("chrome", "edge", "vs code", "word", "powerpoint", "excel", "notepad"):
+        assert name in message, name
+
+
+def test_launch_google_chrome_is_allowlisted(monkeypatch) -> None:
+    import windows_fs
+
+    started: list[str] = []
+    monkeypatch.setattr(
+        windows_fs, "_startfile", lambda path: started.append(str(path))
+    )
+    try:
+        result = launch_application("google chrome")
+    except WindowsFSError as exc:
+        # Not installed on this machine is fine - but it must be ALLOWED.
+        assert exc.code == "APP_MISSING"
+        assert started == []
+    else:
+        assert result["launched"] is True
+        assert started
+        assert str(result["resolved_path"]).casefold().endswith("chrome.exe")
+
+
 def test_launch_microsoft_word_resolves_or_reports_missing(monkeypatch) -> None:
     import windows_fs
 

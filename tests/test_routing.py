@@ -255,3 +255,14 @@ def test_windows_files_truncated_listing_guidance() -> None:
     assert "fixed list" in section
     assert "truncated" in section
     assert "search_files" in section
+    assert "drive he mentioned" in section
+
+
+def test_windows_files_names_the_full_launch_allowlist() -> None:
+    # The assistant must never undersell its capabilities: the prompt lists
+    # the allowlisted desktop applications, including the browsers.
+    section = _section("# Windows files").lower()
+    assert "chrome" in section
+    assert "edge" in section
+    assert "vs code" in section
+    assert "launch_application" in section
