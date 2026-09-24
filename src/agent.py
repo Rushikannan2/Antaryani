@@ -8,7 +8,6 @@ import threading
 from collections.abc import Callable, Iterable
 from typing import TextIO
 
-from dotenv import load_dotenv
 from google.genai import types as genai_types
 from livekit.agents import (
     Agent,
@@ -27,6 +26,7 @@ from activity import ActivityLog
 from browser import BrowserManager
 from confirmation import CONFIRMATION_TOPIC
 from dashboard_api import DashboardServices, run_server, start_dashboard_server
+from env_config import load_environment
 from prompts import AGENT_INSTRUCTIONS
 from session_history import SessionHistory, sanitize_detail
 from system_tools import SystemTools
@@ -75,7 +75,11 @@ def configure_unicode_logs(streams: Iterable[TextIO] | None = None) -> None:
 
 configure_unicode_logs()
 
-load_dotenv(".env.local")
+# Load .env / .env.local. Unlike load_dotenv's default, the credential keys
+# (GOOGLE_API_KEY, GEMINI_API_KEY, LIVEKIT_*) are taken from these files even
+# when a stale copy lingers in the shell, so rotating a key in .env.local
+# always takes effect. Never raises; warns without printing key values.
+load_environment()
 
 
 class Assistant(Agent):

@@ -155,7 +155,15 @@ copy .env.example .env.local
 | `LIVEKIT_URL` | Your LiveKit Cloud WebSocket URL (`wss://…`) |
 | `LIVEKIT_API_KEY` | Project API key |
 | `LIVEKIT_API_SECRET` | Project API secret |
-| `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Google realtime model access |
+| `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) | Google realtime model access — both names are accepted and resolved to one key |
+
+Credential loading is handled by [`src/env_config.py`](src/env_config.py), which follows one simple rule so editing the file always takes effect:
+
+- **Credentials (`GOOGLE_API_KEY`, `GEMINI_API_KEY`, `LIVEKIT_*`) come from the files, not the shell:** `.env.local` wins over `.env`, and both win over a stale value left in your shell — rotating a key in `.env.local` never requires unsetting anything first.
+- **`GOOGLE_API_KEY` and `GEMINI_API_KEY` are aliases:** either name works; the value is written to both so the Google plugin (which reads `GOOGLE_API_KEY`) always sees it. If both are set to different values, `GOOGLE_API_KEY` wins and a warning is logged.
+- **Duplicated lines are safe:** if the same key appears twice in a file, the last value wins.
+- **Copy/paste is forgiving:** wrapping quotes and stray whitespace (including a key line-wrapped mid-value) are stripped automatically.
+- **Both key formats are valid:** Google AI Studio now issues `AQ.…` auth keys; legacy `AIza…` keys are still accepted. A missing or malformed key logs a warning at startup — the warning names the expected prefixes but never prints your key.
 
 You can pull the LiveKit values straight from the cloud instead of copying them by hand:
 
@@ -205,6 +213,10 @@ Never run `pnpm build` while `pnpm dev` is running.
 
 **`ECONNREFUSED` on `/api/dashboard/*`** — the local dashboard API on `127.0.0.1:8787` is not up. It autostarts at worker boot; for frontend-only work start it directly with `uv run python src/dashboard_api.py`.
 
+**`SyntaxError: Unexpected end of JSON input` from `POST /api/token`** — the token endpoint now reads the raw request body first: an empty body is valid and simply means "no room configuration" (the route issues a token with defaults), malformed JSON returns `400` instead of crashing, and every error path returns a response. If you still see this on an older checkout, pull the latest code.
+
+**Rotated the Google API key but the agent still uses the old one** — it can't anymore: `src/env_config.py` loads credentials from `.env.local` (then `.env`) with file-wins precedence, aliases `GEMINI_API_KEY` onto `GOOGLE_API_KEY`, resolves duplicated lines to the last value, and strips pasted whitespace/quotes. Restart the agent after editing the file — environment variables are read once at boot. A warning at startup tells you if the key is missing or doesn't start with `AQ.`/`AIza`; the warning never includes the key itself.
+
 **`The room connection was not established within 10 seconds after calling job_entry`** — the entrypoint calls `ctx.connect()` right after local prep and *before* `AgentSession.start()` (pinned by `tests/test_agent_entrypoint.py`), so on a healthy network the connection is established well inside the 10-second window. If the warning still appears, the room connection itself is slow — usually `wait_pc_connection timed out`, meaning ICE/UDP is being blocked (corporate firewall, VPN, UDP-restricted network) or the LiveKit Cloud region is far away. Those are network-environment issues, not agent bugs: confirm UDP is allowed and retry.
 
 Other start-up log lines — `ssl.create_default_context` blocking, `ai_coustics` FFI initialization, `build_legacy_openai_schema` deprecation, and `no sample` audio warmup — come from the LiveKit, audio, and browser dependencies and are harmless.
@@ -215,7 +227,7 @@ Other start-up log lines — `ssl.create_default_context` blocking, `ai_coustics
 
 | Layer | Command | Coverage |
 |---|---|---|
-| **Unit & behaviour tests** | `uv run pytest` | **516 passed, 1 skipped** — resolution, security policy, confirmation flow, every tool, metrics sanitization, the recorder state machine, the dashboard API, boot-time dashboard autostart, and the room-connect-before-session-start ordering |
+| **Unit & behaviour tests** | `uv run pytest` | **528 passed, 1 skipped** — resolution, security policy, confirmation flow, every tool, metrics sanitization, the recorder state machine, the dashboard API, boot-time dashboard autostart, credential/env loading precedence, and the room-connect-before-session-start ordering |
 | **Lint & format** | `uv run ruff check .` · `uv run ruff format --check .` | Clean |
 | **Conversation simulations** | `lk agent simulate --scenarios scenarios.yaml` | Multi-turn dialogues judged end-to-end ([scenarios.yaml](scenarios.yaml)) |
 | **CI** | GitHub Actions | `ruff.yml` on pushes · `simulations.yml` on merges to `main` |
@@ -245,12 +257,13 @@ Antaryani/
 │   ├── session_history.py  # local SQLite history
 │   ├── activity.py         # sanitized activity ring
 │   ├── dashboard_api.py    # localhost dashboard API
+│   ├── env_config.py       # .env loading: file-wins credentials, aliases, validation
 │   ├── system_tools.py     # model-facing system controls
 │   ├── services.py         # shared singletons: history/activity/recorder
 │   ├── safe_files.py       # collision-free artifact naming
 │   └── __init__.py
 ├── frontend/               # Next.js Srilatha command center
-├── tests/                  # 516 pytest checks
+├── tests/                  # 528 pytest checks
 ├── scenarios.yaml          # conversation simulations
 ├── Dockerfile              # production deployment
 ├── .env.example            # environment template (real keys stay local)
