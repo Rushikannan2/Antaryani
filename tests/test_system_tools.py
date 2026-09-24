@@ -8,6 +8,7 @@ They reuse the same services the dashboard uses - one source of truth.
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,6 +76,22 @@ async def test_get_system_status_returns_live_metrics(tmp_path: Path) -> None:
     assert result["cpu"]["percent"] == 7.0
 
 
+async def test_get_system_status_runs_metrics_off_event_loop(tmp_path: Path) -> None:
+    """psutil sampling sleeps and native calls must never block the agent loop."""
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+
+    def blocking_metrics() -> dict[str, dict[str, object]]:
+        seen.append(threading.get_ident())
+        return {"cpu": {"percent": 42.0}}
+
+    tools, *_ = _tools(tmp_path, metrics_fn=blocking_metrics)
+    result = await tools.get_system_status(make_context(), request="cpu")
+    assert result["cpu"]["percent"] == 42.0
+    assert seen, "the metrics provider must run"
+    assert seen[0] != loop_thread
+
+
 async def test_screenshot_tool_creates_file_and_activity(tmp_path: Path) -> None:
     tools, history, activity, _ = _tools(
         tmp_path,
@@ -134,6 +151,36 @@ async def test_recording_tool_start_and_stop(tmp_path: Path) -> None:
     assert path.exists() and path.stat().st_size > 0
     assert any(entry["kind"] == "recording" for entry in activity.recent())
     recorder.reset()
+
+
+async def test_control_screen_recording_runs_recorder_off_event_loop(
+    tmp_path: Path,
+) -> None:
+    """Recorder transitions (thread joins, AVI finalization) must not block the loop."""
+    loop_thread = threading.get_ident()
+    recorder_threads: list[int] = []
+
+    class _ThreadRecordingRecorder:
+        state = RecordingState.IDLE
+
+        def start(self) -> RecordingState:
+            recorder_threads.append(threading.get_ident())
+            self.state = RecordingState.RECORDING
+            return self.state
+
+        def status(self) -> dict[str, object]:
+            state = self.state
+            return {
+                "state": state.value if isinstance(state, RecordingState) else state
+            }
+
+    tools, *_ = _tools(tmp_path, recorder=_ThreadRecordingRecorder())
+    result = await tools.control_screen_recording(
+        make_context(), command="start recording"
+    )
+    assert result["ok"] is True
+    assert recorder_threads, "the recorder transition must run"
+    assert recorder_threads[0] != loop_thread
 
 
 async def test_recording_tool_pause_resume_via_voice_phrases(tmp_path: Path) -> None:

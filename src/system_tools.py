@@ -86,7 +86,7 @@ class SystemTools:
         """
 
         try:
-            metrics = self.metrics_fn()
+            metrics = await asyncio.to_thread(self.metrics_fn)
         except Exception as exc:
             raise ToolError(f"System metrics are unavailable: {exc}") from exc
         if not isinstance(metrics, dict):
@@ -154,29 +154,7 @@ class SystemTools:
             }
 
         try:
-            if intent is RecordingCommand.START:
-                self.recorder.start()
-                self._record("recording", "started", "Screen recording started")
-            elif intent is RecordingCommand.PAUSE:
-                self.recorder.pause()
-                self._record("recording", "paused", "Screen recording paused")
-            elif intent is RecordingCommand.RESUME:
-                self.recorder.resume()
-                self._record("recording", "resumed", "Screen recording resumed")
-            elif intent is RecordingCommand.STOP:
-                stopped = self.recorder.stop()
-                if (
-                    stopped.get("state") == RecordingState.ERROR.value
-                    or stopped.get("state") is RecordingState.ERROR
-                ):
-                    self._record(
-                        "recording", "error", stopped.get("error", "Recording failed")
-                    )
-                else:
-                    metadata = stopped.get("last") or {}
-                    self._record(
-                        "recording", "saved", metadata.get("path", "Screen recording")
-                    )
+            await asyncio.to_thread(self._apply_recording_command, intent)
         except (InvalidTransitionError, RecordingError, OSError, RuntimeError) as exc:
             self._record("recording", "error", str(exc))
             return {
@@ -185,9 +163,39 @@ class SystemTools:
                 "state": self.recorder.status()["state"],
             }
 
-        status = self.recorder.status()
+        status = await asyncio.to_thread(self.recorder.status)
         status["ok"] = status.get("state") not in {"error"}
         return status
+
+    def _apply_recording_command(self, intent: RecordingCommand) -> None:
+        """Run one recorder transition off the event loop.
+
+        Starting/stopping joins the capture thread and finalizes the video
+        file; doing that on the agent loop would delay audio handling.
+        """
+        if intent is RecordingCommand.START:
+            self.recorder.start()
+            self._record("recording", "started", "Screen recording started")
+        elif intent is RecordingCommand.PAUSE:
+            self.recorder.pause()
+            self._record("recording", "paused", "Screen recording paused")
+        elif intent is RecordingCommand.RESUME:
+            self.recorder.resume()
+            self._record("recording", "resumed", "Screen recording resumed")
+        elif intent is RecordingCommand.STOP:
+            stopped = self.recorder.stop()
+            if (
+                stopped.get("state") == RecordingState.ERROR.value
+                or stopped.get("state") is RecordingState.ERROR
+            ):
+                self._record(
+                    "recording", "error", stopped.get("error", "Recording failed")
+                )
+            else:
+                metadata = stopped.get("last") or {}
+                self._record(
+                    "recording", "saved", metadata.get("path", "Screen recording")
+                )
 
 
 __all__ = ["SystemTools"]

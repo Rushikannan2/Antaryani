@@ -389,13 +389,22 @@ async def start_dashboard_server(
     return runner
 
 
-def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
-    """Run the API standalone for local development."""
+def run_server(
+    host: str = DEFAULT_HOST,
+    port: int | None = None,
+    app: web.Application | None = None,
+) -> None:
+    """Run the API standalone for local development or the boot-time thread."""
 
+    selected_port = int(port or os.environ.get("SRILATHA_DASHBOARD_PORT", DEFAULT_PORT))
     try:
-        web.run_app(create_app(), host=host, port=port, print=lambda *args: None)
+        web.run_app(
+            app or create_app(), host=host, port=selected_port, print=lambda *args: None
+        )
     except OSError as exc:
-        logger.error("dashboard server not started on %s:%s: %s", host, port, exc)
+        logger.error(
+            "dashboard server not started on %s:%s: %s", host, selected_port, exc
+        )
     except Exception:
         logger.exception("dashboard server crashed")
 

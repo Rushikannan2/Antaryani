@@ -182,7 +182,7 @@ pnpm dev
 
 Open [http://localhost:3000](http://localhost:3000) — the voice session and the personal dashboard share the page, and the panels light up once the agent is running.
 
-The agent process serves the local dashboard API on `127.0.0.1:8787` and Next.js rewrites `/api/dashboard/*` to it. To run the API separately for dashboard development:
+The agent process serves the local dashboard API on `127.0.0.1:8787` from worker boot — before the first call — and Next.js rewrites `/api/dashboard/*` to it. Set `SRILATHA_DASHBOARD_AUTOSTART=0` to disable the boot-time server, or run the API separately for dashboard development:
 
 ```console
 uv run python src/dashboard_api.py
@@ -196,7 +196,7 @@ Set `SRILATHA_DASHBOARD_PORT` to choose another local port. The API is bound to 
 
 | Layer | Command | Coverage |
 |---|---|---|
-| **Unit & behaviour tests** | `uv run pytest` | **511 passed, 1 skipped** — resolution, security policy, confirmation flow, every tool, metrics sanitization, the recorder state machine, and the dashboard API |
+| **Unit & behaviour tests** | `uv run pytest` | **515 passed, 1 skipped** — resolution, security policy, confirmation flow, every tool, metrics sanitization, the recorder state machine, the dashboard API, and boot-time dashboard autostart |
 | **Lint & format** | `uv run ruff check .` · `uv run ruff format --check .` | Clean |
 | **Conversation simulations** | `lk agent simulate --scenarios scenarios.yaml` | Multi-turn dialogues judged end-to-end ([scenarios.yaml](scenarios.yaml)) |
 | **CI** | GitHub Actions | `ruff.yml` on pushes · `simulations.yml` on merges to `main` |

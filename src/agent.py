@@ -145,6 +145,50 @@ class Assistant(Agent):
 server = AgentServer()
 _dashboard_services: DashboardServices | None = None
 _dashboard_runner: object | None = None
+_dashboard_autostarted = False
+
+
+def _dashboard_autostart_enabled() -> bool:
+    return os.environ.get("SRILATHA_DASHBOARD_AUTOSTART", "1").casefold() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
+def _run_dashboard_api(app: object) -> None:
+    """Serve until exit; clear the flag when the bind fails so jobs can retry."""
+
+    global _dashboard_autostarted
+    try:
+        run_server(app=app)
+    finally:
+        _dashboard_autostarted = False
+
+
+def start_dashboard_api() -> bool:
+    """Boot the localhost dashboard API as soon as this worker process starts.
+
+    ``lk agent dev``/``lk agent start`` import the entrypoint instead of
+    running it as ``__main__``, and the frontend polls the API before any job
+    arrives. Starting the server at import time (idempotent, non-fatal)
+    removes the connection-refused window between worker boot and the first
+    session; the per-job bind in ``_get_dashboard_services`` remains as a
+    fallback when this boot-time bind fails.
+    """
+
+    global _dashboard_autostarted
+    if _dashboard_autostarted or not _dashboard_autostart_enabled():
+        return _dashboard_autostarted
+    _dashboard_autostarted = True
+    app = DashboardServices().app()
+    threading.Thread(
+        target=_run_dashboard_api,
+        args=(app,),
+        name="srilatha-dashboard-api",
+        daemon=True,
+    ).start()
+    return True
 
 
 async def _get_dashboard_services() -> DashboardServices:
@@ -153,13 +197,14 @@ async def _get_dashboard_services() -> DashboardServices:
     LiveKit may dispatch several jobs on different event loops in one worker.
     A module-level ``asyncio.Lock`` would bind itself to the first loop and
     crash later jobs, so startup is intentionally idempotent without one.
-    The localhost bind is non-fatal when another job already owns the port.
+    Normally ``start_dashboard_api`` already serves from worker boot; this
+    per-job bind only runs when that boot-time bind failed.
     """
 
     global _dashboard_runner, _dashboard_services
     if _dashboard_services is None:
         _dashboard_services = DashboardServices()
-    if _dashboard_runner is None:
+    if _dashboard_runner is None and not _dashboard_autostarted:
         _dashboard_runner = await start_dashboard_server(_dashboard_services.app())
     return _dashboard_services
 
@@ -325,15 +370,11 @@ async def my_agent(ctx: JobContext):
     identities.extend(ctx.room.remote_participants)
 
 
+# ``lk agent dev``/``lk agent start`` import this module instead of running it
+# as ``__main__``, so boot the dashboard API here: it must serve before the
+# first job arrives or the frontend proxy sees ECONNREFUSED.
+start_dashboard_api()
+
+
 if __name__ == "__main__":
-    if os.environ.get("SRILATHA_DASHBOARD_AUTOSTART", "1").casefold() not in {
-        "0",
-        "false",
-        "no",
-    }:
-        threading.Thread(
-            target=run_server,
-            name="srilatha-dashboard-api",
-            daemon=True,
-        ).start()
     cli.run_app(server)
