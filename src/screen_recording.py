@@ -556,10 +556,14 @@ class RecordingManager:
                 self._pause_evt.clear()
 
         if thread is not None and thread.is_alive():
-            thread.join(timeout=max(2.0, 4.0 / self._fps))
+            thread.join(timeout=15.0)
 
         with self._lock:
             capture_error = self._capture_error
+            if thread is not None and thread.is_alive():
+                capture_error = (
+                    "Recording worker did not stop within the safety timeout"
+                )
             frames = self._frames
             if writer is None or capture_error is not None or frames == 0:
                 if writer is not None:

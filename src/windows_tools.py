@@ -280,6 +280,7 @@ class WindowsTools:
             resolved = self._resolve(path)
             result = await asyncio.to_thread(windows_fs.list_directory, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
         return result
@@ -305,6 +306,7 @@ class WindowsTools:
                 windows_fs.search_files, resolved_root, pattern
             )
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["root"])
         for hit in result["results"]:
@@ -330,6 +332,7 @@ class WindowsTools:
             resolved = self._resolve(path)
             result = await asyncio.to_thread(windows_fs.read_file, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
         return result
@@ -349,6 +352,7 @@ class WindowsTools:
             resolved = self._resolve(path)
             result = await asyncio.to_thread(windows_fs.inspect_tree, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
         return result
@@ -365,6 +369,7 @@ class WindowsTools:
             resolved = self._resolve(path)
             result = await asyncio.to_thread(windows_fs.file_exists, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         return result
 
@@ -380,6 +385,7 @@ class WindowsTools:
             resolved = self._resolve(path)
             result = await asyncio.to_thread(windows_fs.folder_exists, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         return result
 
@@ -395,6 +401,7 @@ class WindowsTools:
             resolved = self._resolve(path)
             result = await asyncio.to_thread(windows_fs.get_file_info, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
         return result
@@ -437,6 +444,7 @@ class WindowsTools:
                 windows_fs.create_file, resolved, content, overwrite=overwrite
             )
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
         self._record("file", "ok", f"Created {result['path']}")
@@ -462,6 +470,7 @@ class WindowsTools:
             )
             result = await asyncio.to_thread(windows_fs.create_folder, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
         self._record("file", "ok", f"Created folder {result['path']}")
@@ -527,6 +536,7 @@ class WindowsTools:
                 append=append,
             )
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
         self._record("file", "ok", f"Edited {result['path']}")
@@ -562,6 +572,7 @@ class WindowsTools:
             )
             result = await asyncio.to_thread(windows_fs.rename_path, str(src), new_name)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["to"])
         self._record("file", "ok", f"Renamed {src.name} to {result['to']}")
@@ -598,6 +609,7 @@ class WindowsTools:
             )
             result = await asyncio.to_thread(windows_fs.move_path, str(src), str(dest))
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["to"])
         self._record("file", "ok", f"Moved {src.name} to {final}")
@@ -647,6 +659,7 @@ class WindowsTools:
                 overwrite=overwrite,
             )
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["to"])
         self._record("file", "ok", f"Copied {src.name} to {result['to']}")
@@ -679,6 +692,7 @@ class WindowsTools:
             )
             result = await asyncio.to_thread(windows_fs.recycle_path, str(src))
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._record("file", "ok", f"Recycled {src.name}")
         return result
@@ -729,6 +743,7 @@ class WindowsTools:
                     "method": "recycle_bin",
                 }
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._record("file", "ok", f"Deleted {src.name}")
         return result
@@ -752,6 +767,7 @@ class WindowsTools:
             resolved = self._resolve(path)
             result = await asyncio.to_thread(windows_fs.open_path, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
         self._record("file", "ok", f"Opened {result['path']}")
@@ -775,6 +791,7 @@ class WindowsTools:
         try:
             result = await asyncio.to_thread(windows_fs.launch_application, application)
         except (WindowsFSError, SecurityPolicyError) as exc:
+            self._record("file", "error", str(exc))
             raise ToolError(str(exc)) from exc
         self._record(
             "application", "ok", f"Opened {result.get('application', application)}"

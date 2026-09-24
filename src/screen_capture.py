@@ -113,6 +113,8 @@ def _enumerate_displays(image: Image.Image) -> list[dict]:
 def grab_desktop() -> tuple[Image.Image, list[dict]]:
     """Capture the full virtual desktop and enumerate the displays."""
     image = ImageGrab.grab(all_screens=True)
+    if not isinstance(image, Image.Image):
+        raise RuntimeError("the Windows screen API returned an invalid image")
     return image, _enumerate_displays(image)
 
 
