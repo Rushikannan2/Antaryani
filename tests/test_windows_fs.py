@@ -16,20 +16,27 @@ import pytest
 
 from windows_fs import (
     MAX_LIST_ENTRIES,
+    MAX_READ_BYTES,
     MAX_SEARCH_RESULTS,
+    MAX_TREE_DEPTH,
+    MAX_TREE_ENTRIES,
     WindowsFSError,
     copy_path,
     count_items,
     create_file,
     create_folder,
     delete_path,
+    edit_file,
     file_exists,
     folder_exists,
     get_file_info,
+    inspect_tree,
     launch_application,
     list_directory,
     move_path,
     open_path,
+    plan_edit,
+    read_file,
     recycle_path,
     rename_path,
     resolve_known_folder,
@@ -820,3 +827,684 @@ def test_count_items_caps_quickly(tmp_path) -> None:
     # capped walk must not need the whole tree to exceed the cap
     assert count_items(tree) >= 51
     assert count_items(tree) <= MAX_BULK_ITEMS + 1
+
+
+# ----------------------------------------------------------------------
+# Part 7: reading files, trees, and documents
+# ----------------------------------------------------------------------
+def _make_docx(path, paragraphs: list[str]):
+    """Build a minimal .docx (a zip containing word/document.xml)."""
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    body = "".join(
+        f"<w:p><w:r><w:t>{escape(text)}</w:t></w:r></w:p>" for text in paragraphs
+    )
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+        'wordprocessingml/2006/main">'
+        f"<w:body>{body}</w:body></w:document>"
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", document)
+    return path
+
+
+def _make_pptx(path, slides: list[str]):
+    """Build a minimal .pptx (a zip with ppt/slides/slideN.xml files)."""
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        for index, text in enumerate(slides, start=1):
+            slide = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<p:sld xmlns:a="http://schemas.openxmlformats.org/'
+                'drawingml/2006/main" xmlns:p="http://schemas.openxmlformats'
+                '.org/presentationml/2006/main">'
+                "<p:cSld><p:spTree><p:sp><p:txBody><a:p>"
+                f"<a:r><a:t>{escape(text)}</a:t></a:r>"
+                "</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"
+            )
+            archive.writestr(f"ppt/slides/slide{index}.xml", slide)
+    return path
+
+
+def _minimal_pdf(text: str) -> bytes:
+    """A one-page PDF with one line of extractable text (or none)."""
+    if text:
+        content = f"BT /F1 24 Tf 72 700 Td ({text}) Tj ET".encode("latin-1")
+    else:
+        content = b"BT ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>"
+        ),
+        b"<< /Length "
+        + str(len(content)).encode()
+        + b" >>\nstream\n"
+        + content
+        + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{index} 0 obj\n".encode() + obj + b"\nendobj\n"
+    xref_at = len(out)
+    out += b"xref\n0 6\n0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += b"trailer << /Size 6 /Root 1 0 R >>\n"
+    out += f"startxref\n{xref_at}\n%%EOF\n".encode()
+    return bytes(out)
+
+
+def test_read_file_returns_text(tmp_path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("hello\nworld", encoding="utf-8")
+    result = read_file(str(target))
+    assert set(result) == {
+        "path",
+        "name",
+        "extension",
+        "kind",
+        "size_bytes",
+        "content",
+        "lines",
+        "truncated",
+    }
+    assert result["path"] == str(target.resolve())
+    assert result["name"] == "note.txt"
+    assert result["extension"] == ".txt"
+    assert result["kind"] == "text"
+    assert result["content"] == "hello\nworld"
+    assert result["lines"] == 2
+    assert result["truncated"] is False
+    assert result["size_bytes"] == target.stat().st_size
+
+
+def test_read_file_empty_text_is_not_an_error(tmp_path) -> None:
+    target = tmp_path / "empty.txt"
+    target.write_text("", encoding="utf-8")
+    result = read_file(str(target))
+    assert result["content"] == ""
+    assert result["lines"] == 0
+    assert result["truncated"] is False
+
+
+def test_read_file_missing(tmp_path) -> None:
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(tmp_path / "ghost.txt"))
+    assert _code(excinfo) == "NOT_FOUND"
+
+
+def test_read_file_folder_reports_not_found(tmp_path) -> None:
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(tmp_path))
+    assert _code(excinfo) == "NOT_FOUND"
+
+
+def test_read_file_rejects_binary_content(tmp_path) -> None:
+    target = tmp_path / "blob.dat"
+    target.write_bytes(b"MZ\x90\x00\x03\x00")
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(target))
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_read_file_rejects_non_utf8(tmp_path) -> None:
+    target = tmp_path / "latin.txt"
+    target.write_bytes(b"\xff\xfe caf\xe9")
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(target))
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_read_file_rejects_files_larger_than_the_cap(tmp_path) -> None:
+    target = tmp_path / "huge.txt"
+    target.write_bytes(b"a" * (MAX_READ_BYTES + 1))
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(target))
+    assert _code(excinfo) == "TOO_LARGE"
+
+
+def test_read_file_truncates_long_content(tmp_path) -> None:
+    target = tmp_path / "long.txt"
+    target.write_text("x" * 250_000, encoding="utf-8")
+    result = read_file(str(target))
+    assert result["truncated"] is True
+    assert len(result["content"]) == 200_000
+
+
+def test_read_file_rejects_spreadsheets(tmp_path) -> None:
+    target = tmp_path / "book.xlsx"
+    target.write_bytes(b"PK\x03\x04 not really an xlsx")
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(target))
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_read_file_extracts_docx_text(tmp_path) -> None:
+    target = _make_docx(tmp_path / "report.docx", ["Quarterly report", "Revenue is up"])
+    result = read_file(str(target))
+    assert result["kind"] == "docx"
+    assert result["extension"] == ".docx"
+    assert "Quarterly report" in result["content"]
+    assert "Revenue is up" in result["content"]
+    assert result["content"].index("Quarterly report") < result["content"].index(
+        "Revenue is up"
+    )
+    assert result["truncated"] is False
+
+
+def test_read_file_extracts_pptx_slides(tmp_path) -> None:
+    target = _make_pptx(tmp_path / "deck.pptx", ["Slide one text", "Slide two text"])
+    result = read_file(str(target))
+    assert result["kind"] == "pptx"
+    content = str(result["content"])
+    assert "--- slide 1 ---" in content
+    assert "--- slide 2 ---" in content
+    assert "Slide one text" in content
+    assert "Slide two text" in content
+    assert content.index("--- slide 1 ---") < content.index("--- slide 2 ---")
+
+
+def test_read_file_extracts_pdf_text(tmp_path) -> None:
+    target = tmp_path / "sample.pdf"
+    target.write_bytes(_minimal_pdf("PART7 PDF SAMPLE"))
+    result = read_file(str(target))
+    assert result["kind"] == "pdf"
+    assert "PART7 PDF SAMPLE" in str(result["content"])
+
+
+def test_read_file_pdf_without_text_is_honest_not_an_error(tmp_path) -> None:
+    target = tmp_path / "blank.pdf"
+    target.write_bytes(_minimal_pdf(""))
+    result = read_file(str(target))
+    assert result["kind"] == "pdf"
+    assert "no extractable text" in str(result["content"]).casefold()
+
+
+def test_read_file_encrypted_pdf_is_unsupported(tmp_path) -> None:
+    from pypdf import PdfWriter
+
+    target = tmp_path / "locked.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.encrypt("secret-password")
+    with target.open("wb") as handle:
+        writer.write(handle)
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(target))
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_read_file_corrupt_docx_is_unsupported(tmp_path) -> None:
+    target = tmp_path / "broken.docx"
+    target.write_bytes(b"PK\x03\x04 this is not a zip archive")
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(target))
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_read_file_pdf_without_pypdf_is_unsupported(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "sample.pdf"
+    target.write_bytes(_minimal_pdf("PART7 PDF SAMPLE"))
+    monkeypatch.setitem(sys.modules, "pypdf", None)
+    with pytest.raises(WindowsFSError) as excinfo:
+        read_file(str(target))
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+# ----------------------------------------------------------------------
+# Part 7: bounded folder trees
+# ----------------------------------------------------------------------
+def test_tree_limits_are_bounded_constants() -> None:
+    assert MAX_TREE_DEPTH == 5
+    assert MAX_TREE_ENTRIES == 400
+
+
+def test_inspect_tree_reports_structure(tmp_path) -> None:
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("print(1)", encoding="utf-8")
+    (root / "README.md").write_text("# proj", encoding="utf-8")
+    result = inspect_tree(str(root))
+    assert result["path"] == str(root.resolve())
+    assert "README.md" in result["tree"]
+    assert "app.py" in result["tree"]
+    assert "src" in result["tree"]
+    assert "\u251c" in result["tree"] or "\u2514" in result["tree"]
+    assert result["files"] == 2
+    assert result["folders"] == 1
+    assert result["total_size_bytes"] == len("print(1)") + len("# proj")
+    assert result["extensions"] == {".md": 1, ".py": 1}
+    assert result["important_files"] == ["README.md"]
+    assert result["truncated"] is False
+    assert result["skipped"] == 0
+
+
+def test_inspect_tree_depth_is_bounded(tmp_path) -> None:
+    root = tmp_path / "deep"
+    nested = root / "a" / "b" / "c"
+    nested.mkdir(parents=True)
+    (nested / "deep.txt").write_text("x", encoding="utf-8")
+    result = inspect_tree(str(root), max_depth=2)
+    assert result["truncated"] is True
+    assert "deep.txt" not in result["tree"]
+
+
+def test_inspect_tree_entry_count_is_bounded(tmp_path) -> None:
+    root = tmp_path / "many"
+    root.mkdir()
+    for index in range(8):
+        (root / f"file{index}.txt").write_text("x", encoding="utf-8")
+    result = inspect_tree(str(root), max_entries=5)
+    assert result["truncated"] is True
+    assert result["files"] + result["folders"] == 5
+
+
+def test_inspect_tree_never_descends_into_junctions(tmp_path) -> None:
+    import _winapi
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "junction-secret.txt").write_text("secret", encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "real.txt").write_text("x", encoding="utf-8")
+    _winapi.CreateJunction(str(outside), str(root / "link"))
+    result = inspect_tree(str(root))
+    assert "link" in result["tree"]  # the junction is listed ...
+    assert "junction-secret.txt" not in result["tree"]  # ... never followed
+    assert result["files"] == 1
+    assert result["skipped"] >= 1
+    assert result["truncated"] is False
+
+
+def test_inspect_tree_missing(tmp_path) -> None:
+    with pytest.raises(WindowsFSError) as excinfo:
+        inspect_tree(str(tmp_path / "ghost"))
+    assert _code(excinfo) == "NOT_FOUND"
+
+
+def test_inspect_tree_rejects_a_file(tmp_path) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(WindowsFSError) as excinfo:
+        inspect_tree(str(target))
+    assert _code(excinfo) == "NOT_FOUND"
+
+
+# ----------------------------------------------------------------------
+# Part 7: plan_edit preflight (everything validated BEFORE confirmation)
+# ----------------------------------------------------------------------
+def test_plan_edit_counts_matches(tmp_path) -> None:
+    target = tmp_path / "app.cfg"
+    target.write_text("x=1\ny=1", encoding="utf-8")
+    plan = plan_edit(str(target), mode="replace", find="1", replace="2")
+    assert plan == {"path": str(target.resolve()), "mode": "replace", "matches": 2}
+
+
+def test_plan_edit_append_mode_never_writes(tmp_path) -> None:
+    target = tmp_path / "log.txt"
+    target.write_text("line", encoding="utf-8")
+    plan = plan_edit(str(target), mode="append", append="\nmore")
+    assert plan["mode"] == "append"
+    assert target.read_text(encoding="utf-8") == "line"
+
+
+def test_plan_edit_invalid_mode(tmp_path) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(WindowsFSError) as excinfo:
+        plan_edit(str(target), mode="write", find="x", replace="y")
+    assert _code(excinfo) == "INVALID_NAME"
+
+
+def test_plan_edit_replace_requires_a_find_text(tmp_path) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(WindowsFSError) as excinfo:
+        plan_edit(str(target), mode="replace", find="", replace="y")
+    assert _code(excinfo) == "INVALID_NAME"
+
+
+def test_plan_edit_missing_file(tmp_path) -> None:
+    with pytest.raises(WindowsFSError) as excinfo:
+        plan_edit(str(tmp_path / "ghost.txt"), mode="append", append="x")
+    assert _code(excinfo) == "NOT_FOUND"
+
+
+def test_plan_edit_find_absent(tmp_path) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(WindowsFSError) as excinfo:
+        plan_edit(str(target), mode="replace", find="zzz", replace="q")
+    assert _code(excinfo) == "NO_MATCH"
+
+
+def test_plan_edit_rejects_office_documents(tmp_path) -> None:
+    target = _make_docx(tmp_path / "report.docx", ["hello"])
+    with pytest.raises(WindowsFSError) as excinfo:
+        plan_edit(str(target), mode="append", append="x")
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_plan_edit_rejects_protected_sources(tmp_path) -> None:
+    with pytest.raises(SecurityPolicyError, match="protected"):
+        plan_edit("C:\\Windows\\System32\\kernel32.dll", mode="append", append="x")
+
+
+def test_plan_edit_rejects_binary_files(tmp_path) -> None:
+    target = tmp_path / "blob.dat"
+    target.write_bytes(b"MZ\x00\x01")
+    with pytest.raises(WindowsFSError) as excinfo:
+        plan_edit(str(target), mode="append", append="x")
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_plan_edit_rejects_files_over_the_size_cap(tmp_path) -> None:
+    target = tmp_path / "huge.txt"
+    target.write_bytes(b"a" * (MAX_READ_BYTES + 1))
+    with pytest.raises(WindowsFSError) as excinfo:
+        plan_edit(str(target), mode="append", append="x")
+    assert _code(excinfo) == "TOO_LARGE"
+
+
+# ----------------------------------------------------------------------
+# Part 7: edit_file (read-before-write, verified after every write)
+# ----------------------------------------------------------------------
+def test_edit_file_replaces_all_occurrences(tmp_path) -> None:
+    target = tmp_path / "cfg.txt"
+    target.write_text("a=1;b=1;c=1", encoding="utf-8")
+    result = edit_file(str(target), mode="replace", find="=1", replace="=2")
+    assert result["path"] == str(target.resolve())
+    assert result["mode"] == "replace"
+    assert result["replaced"] == 3
+    assert result["verified"] is True
+    assert target.read_text(encoding="utf-8") == "a=2;b=2;c=2"
+
+
+def test_edit_file_appends_verbatim(tmp_path) -> None:
+    target = tmp_path / "log.txt"
+    target.write_text("first", encoding="utf-8")
+    result = edit_file(str(target), mode="append", append="\nsecond")
+    assert result["mode"] == "append"
+    assert result["replaced"] == 0
+    assert result["verified"] is True
+    assert target.read_text(encoding="utf-8") == "first\nsecond"
+
+
+def test_edit_file_missing_find_does_not_write(tmp_path) -> None:
+    target = tmp_path / "cfg.txt"
+    target.write_text("unchanged", encoding="utf-8")
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(target), mode="replace", find="zzz", replace="q")
+    assert _code(excinfo) == "NO_MATCH"
+    assert target.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_edit_file_invalid_mode(tmp_path) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(target), mode="delete", find="x", replace="y")
+    assert _code(excinfo) == "INVALID_NAME"
+
+
+def test_edit_file_missing(tmp_path) -> None:
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(tmp_path / "ghost.txt"), mode="append", append="x")
+    assert _code(excinfo) == "NOT_FOUND"
+
+
+def test_edit_file_folder_is_not_editable(tmp_path) -> None:
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(tmp_path), mode="append", append="x")
+    assert _code(excinfo) == "NOT_FOUND"
+
+
+def test_edit_file_rejects_office_documents(tmp_path) -> None:
+    target = _make_docx(tmp_path / "report.docx", ["hello"])
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(target), mode="append", append="x")
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_edit_file_rejects_binary_files(tmp_path) -> None:
+    target = tmp_path / "blob.dat"
+    target.write_bytes(b"MZ\x00\x01")
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(target), mode="append", append="x")
+    assert _code(excinfo) == "UNSUPPORTED"
+
+
+def test_edit_file_rejects_files_over_the_size_cap(tmp_path) -> None:
+    target = tmp_path / "huge.txt"
+    target.write_bytes(b"a" * (MAX_READ_BYTES + 1))
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(target), mode="append", append="x")
+    assert _code(excinfo) == "TOO_LARGE"
+
+
+def test_edit_file_refuses_protected_sources() -> None:
+    with pytest.raises(SecurityPolicyError, match="protected"):
+        edit_file("C:\\Windows\\System32\\kernel32.dll", mode="append", append="x")
+
+
+def test_edit_file_write_permission_failure(tmp_path, monkeypatch) -> None:
+    import windows_fs
+
+    target = tmp_path / "cfg.txt"
+    target.write_text("x=1", encoding="utf-8")
+
+    def deny(_path, _data):
+        raise PermissionError(5, "denied")
+
+    monkeypatch.setattr(windows_fs, "_write_text", deny)
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(target), mode="replace", find="1", replace="2")
+    assert _code(excinfo) == "ACCESS_DENIED"
+    assert target.read_text(encoding="utf-8") == "x=1"
+
+
+def test_edit_file_verification_catches_silent_write_failure(
+    tmp_path, monkeypatch
+) -> None:
+    import windows_fs
+
+    target = tmp_path / "cfg.txt"
+    target.write_text("x=1", encoding="utf-8")
+    monkeypatch.setattr(windows_fs, "_write_text", lambda _path, _data: None)
+    with pytest.raises(WindowsFSError) as excinfo:
+        edit_file(str(target), mode="replace", find="1", replace="2")
+    assert _code(excinfo) == "VERIFY_FAILED"
+    assert target.read_text(encoding="utf-8") == "x=1"
+
+
+def test_edit_file_preserves_crlf_line_endings(tmp_path) -> None:
+    target = tmp_path / "windows.txt"
+    target.write_bytes(b"one\r\ntwo\r\nthree")
+    edit_file(str(target), mode="replace", find="two", replace="TWO")
+    assert target.read_bytes() == b"one\r\nTWO\r\nthree"
+
+
+def test_edit_file_read_only_file_reports_access_denied(tmp_path) -> None:
+    import stat
+
+    target = tmp_path / "ro.txt"
+    target.write_text("x=1", encoding="utf-8")
+    os.chmod(target, stat.S_IREAD)
+    try:
+        with pytest.raises(WindowsFSError) as excinfo:
+            edit_file(str(target), mode="replace", find="1", replace="2")
+        assert _code(excinfo) == "ACCESS_DENIED"
+    finally:
+        os.chmod(target, stat.S_IWRITE)
+    assert target.read_text(encoding="utf-8") == "x=1"
+
+
+# ----------------------------------------------------------------------
+# Part 7: folder search, folder rename, folder recycle/delete
+# ----------------------------------------------------------------------
+def test_search_includes_matching_folders(tmp_path) -> None:
+    (tmp_path / "budget-2026").mkdir()
+    (tmp_path / "budget.txt").write_text("x", encoding="utf-8")
+    result = search_files(str(tmp_path), "budget")
+    names = {os.path.basename(item) for item in result["results"]}
+    assert names == {"budget-2026", "budget.txt"}
+    assert result["count"] == 2
+
+
+def test_search_folder_only_match(tmp_path) -> None:
+    (tmp_path / "project-invoices").mkdir()
+    result = search_files(str(tmp_path), "invoices")
+    assert result["count"] == 1
+    assert os.path.basename(result["results"][0]) == "project-invoices"
+
+
+def test_search_non_recursive_includes_top_level_folders(tmp_path) -> None:
+    (tmp_path / "target-folder").mkdir()
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "target-file.txt").write_text("x", encoding="utf-8")
+    result = search_files(str(tmp_path), "target", recursive=False)
+    names = {os.path.basename(item) for item in result["results"]}
+    assert names == {"target-folder"}
+
+
+def test_rename_folder(tmp_path) -> None:
+    folder = tmp_path / "old-name"
+    folder.mkdir()
+    (folder / "keep.txt").write_text("keep", encoding="utf-8")
+    rename_path(str(folder), "new-name")
+    assert (tmp_path / "new-name").is_dir()
+    assert (tmp_path / "new-name" / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert not folder.exists()
+
+
+def test_rename_folder_rejects_invalid_name(tmp_path) -> None:
+    folder = tmp_path / "a"
+    folder.mkdir()
+    with pytest.raises(WindowsFSError) as excinfo:
+        rename_path(str(folder), "..\\..\\evil")
+    assert _code(excinfo) == "INVALID_NAME"
+
+
+def test_recycle_empty_folder(tmp_path) -> None:
+    folder = tmp_path / "empty-folder"
+    folder.mkdir()
+    result = recycle_path(str(folder))
+    assert result["recycled"] is True
+    assert not folder.exists()
+
+
+def test_delete_non_empty_folder_permanently(tmp_path) -> None:
+    folder = tmp_path / "stuff"
+    folder.mkdir()
+    (folder / "a.txt").write_text("x", encoding="utf-8")
+    (folder / "sub").mkdir()
+    (folder / "sub" / "b.txt").write_text("y", encoding="utf-8")
+    result = delete_path(str(folder), recursive=True)
+    assert result["method"] == "permanent"
+    assert not folder.exists()
+
+
+# ----------------------------------------------------------------------
+# Part 7: document associations and the Office application allowlist
+# ----------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name",
+    [
+        "report.docx",
+        "deck.pptx",
+        "book.xlsx",
+        "paper.pdf",
+        "notes.txt",
+        "readme.md",
+        "data.csv",
+    ],
+)
+def test_open_path_allows_common_documents(tmp_path, monkeypatch, name) -> None:
+    import windows_fs
+
+    started: list[str] = []
+    monkeypatch.setattr(
+        windows_fs, "_startfile", lambda path: started.append(str(path))
+    )
+    target = tmp_path / name
+    target.write_text("x", encoding="utf-8")
+    result = open_path(str(target))
+    assert result["opened"] is True
+    assert started == [str(target.resolve())]
+
+
+def test_office_candidates_come_from_fixed_install_paths() -> None:
+    import windows_fs
+
+    expectations = {
+        "word": "WINWORD.EXE",
+        "powerpoint": "POWERPNT.EXE",
+        "excel": "EXCEL.EXE",
+    }
+    for key, executable in expectations.items():
+        candidates = windows_fs._application_candidates(key)
+        assert candidates, key
+        assert any(candidate.name.upper() == executable for candidate in candidates), (
+            key
+        )
+
+
+@pytest.mark.parametrize(
+    ("alias", "executable"),
+    [
+        ("microsoft word", "WINWORD.EXE"),
+        ("ms word", "WINWORD.EXE"),
+        ("winword", "WINWORD.EXE"),
+        ("microsoft powerpoint", "POWERPNT.EXE"),
+        ("powerpnt", "POWERPNT.EXE"),
+        ("ms powerpoint", "POWERPNT.EXE"),
+        ("microsoft excel", "EXCEL.EXE"),
+        ("ms excel", "EXCEL.EXE"),
+    ],
+)
+def test_office_aliases_resolve_to_fixed_candidates(alias, executable) -> None:
+    import windows_fs
+
+    candidates = windows_fs._application_candidates(alias)
+    assert any(candidate.name.upper() == executable for candidate in candidates), alias
+
+
+def test_launch_microsoft_word_resolves_or_reports_missing(monkeypatch) -> None:
+    import windows_fs
+
+    started: list[str] = []
+    monkeypatch.setattr(
+        windows_fs, "_startfile", lambda path: started.append(str(path))
+    )
+    try:
+        result = launch_application("Microsoft Word")
+    except WindowsFSError as exc:
+        assert exc.code == "APP_MISSING"
+        assert started == []
+    else:
+        assert result["launched"] is True
+        assert str(result["resolved_path"]).upper().endswith("WINWORD.EXE")
+        assert len(started) == 1
+
+
+def test_unknown_app_message_lists_office_apps() -> None:
+    with pytest.raises(WindowsFSError) as excinfo:
+        launch_application("hacker-tool")
+    message = str(excinfo.value).casefold()
+    assert "word" in message
+    assert "powerpoint" in message
+    assert "excel" in message

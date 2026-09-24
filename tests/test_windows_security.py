@@ -255,7 +255,9 @@ def test_read_operations_classified_read() -> None:
         "list_directory",
         "search_files",
         "file_exists",
+        "folder_exists",
         "get_file_info",
+        "inspect_tree",
         "read_file",
     ):
         assert classify_operation(operation) is OperationRisk.READ
@@ -275,6 +277,7 @@ def test_low_risk_operations_classified_low_risk() -> None:
 
 def test_moderate_operations_classified_moderate() -> None:
     for operation in (
+        "edit_file",
         "move_path",
         "move_folder",
         "bulk_copy",
@@ -322,7 +325,10 @@ def test_empty_operation_name_is_rejected() -> None:
 
 def test_requires_confirmation_matrix() -> None:
     assert requires_confirmation("list_directory") is False
+    assert requires_confirmation("read_file") is False
+    assert requires_confirmation("inspect_tree") is False
     assert requires_confirmation("create_file") is False
+    assert requires_confirmation("edit_file") is True
     assert requires_confirmation("move_path") is True
     assert requires_confirmation("delete_path") is True
     assert requires_confirmation("format_drive") is True
@@ -835,3 +841,31 @@ def test_windows_security_exposes_no_model_tools() -> None:
     # The policy layer must not be callable by the model directly.
     source = (_SRC / "windows_security.py").read_text(encoding="utf-8")
     assert "function_tool" not in source
+
+
+# ----------------------------------------------------------------------
+# Part 7: editing is confirmed and can never touch protected sources
+# ----------------------------------------------------------------------
+def test_editing_from_protected_location_is_refused() -> None:
+    with pytest.raises(SecurityPolicyError, match="protected"):
+        validate_source("C:\\Windows\\System32\\kernel32.dll", operation="edit_file")
+
+
+def test_stage_rejects_edit_of_protected_source() -> None:
+    manager = ConfirmationManager()
+    with pytest.raises(SecurityPolicyError, match="protected"):
+        manager.stage(
+            operation="edit_file",
+            description="change a system file",
+            source="C:\\Windows\\System32\\kernel32.dll",
+        )
+
+
+def test_edit_file_has_consumes_source_policy() -> None:
+    # an edit rewrites its source in place: the policy must say so, so that
+    # validate_source and stage both refuse protected locations.
+    from windows_security import _OPERATION_POLICIES
+
+    policy = _OPERATION_POLICIES["edit_file"]
+    assert policy.consumes_source is True
+    assert policy.writes_destination is False

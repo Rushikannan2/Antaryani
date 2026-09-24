@@ -234,3 +234,14 @@ def test_agent_publishes_codes_on_the_confirmation_topic() -> None:
     assert "publish_data" in source
     assert "CONFIRMATION_TOPIC" in source
     assert "destination_identities" in source
+
+
+def test_windows_files_part7_capabilities() -> None:
+    section = _section("# Windows files").lower()
+    assert "read_file" in section
+    assert "inspect_tree" in section
+    assert "edit_file" in section
+    assert "word" in section
+    assert "powerpoint" in section
+    assert "excel" in section
+    assert "ambiguous" in section

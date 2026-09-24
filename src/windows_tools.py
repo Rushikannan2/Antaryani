@@ -17,7 +17,8 @@ Security chain for every tool (the prompt is NOT the boundary):
    user clearly agrees - unlocks the retried call. CRITICAL/protected
    requests can never be staged, so they can never be confirmed.
 4. Failures map to ``ToolError`` with stable codes (NOT_FOUND, CONFLICT,
-   ACCESS_DENIED, ...) so the agent can explain them naturally by voice.
+   ACCESS_DENIED, NO_MATCH, AMBIGUOUS, ...) so the agent can explain them
+   naturally by voice.
 
 No tool exposes a shell or arbitrary program execution: opening uses
 Windows file associations (never executables), launching uses the fixed
@@ -50,7 +51,7 @@ from windows_security import (
 
 
 class WindowsTools:
-    """The 15 Windows filesystem tools plus confirm and cancel helpers."""
+    """The Windows filesystem tools plus confirm and cancel helpers."""
 
     def __init__(
         self, confirmation_publisher: Callable[[dict], None] | None = None
@@ -67,17 +68,23 @@ class WindowsTools:
         self._last_folder: str | None = None
         # The most recently used item of any type, for bare "it"/"this"/"that".
         self._last_item: str | None = None
+        # Recent paths (newest first) so a bare name can be disambiguated
+        # against items we have actually touched this session.
+        self._recent: list[str] = []
 
     @property
     def tools(self) -> list:
         return [
             self.list_directory,
             self.search_files,
+            self.read_file,
+            self.inspect_tree,
             self.file_exists,
             self.folder_exists,
             self.get_file_info,
             self.create_file,
             self.create_folder,
+            self.edit_file,
             self.rename_path,
             self.move_path,
             self.copy_path,
@@ -92,19 +99,57 @@ class WindowsTools:
     # ------------------------------------------------------------------
     # references and context
     # ------------------------------------------------------------------
+    _RECENT_LIMIT = 25
+
     def _resolve(self, raw: str) -> str:
         """Turn a natural reference into an absolute candidate path."""
-        return windows_fs.resolve_user_path(
+        candidate = windows_fs.resolve_user_path(
             raw,
             context_dir=self._context_dir,
             context_file=self._last_file,
             context_folder=self._last_folder,
             context_item=self._last_item,
         )
+        return self._disambiguate(raw, candidate)
+
+    def _disambiguate(self, raw: str, candidate: str) -> str:
+        """A bare name matching several recent items: ask, never guess."""
+        if Path(candidate).exists():
+            return candidate  # an existing primary always wins
+        value = raw.strip().strip('"').strip("'")
+        if not value or "\\" in value or "/" in value:
+            return candidate
+        if Path(value).is_absolute():
+            return candidate
+        wanted = Path(candidate).name.casefold()
+        matches = [
+            recent
+            for recent in self._recent
+            if Path(recent).name.casefold() == wanted and Path(recent).exists()
+        ]
+        if len(matches) > 1:
+            listing = "; ".join(matches)
+            raise WindowsFSError(
+                "AMBIGUOUS",
+                f"Several items are named {Path(candidate).name!r}: "
+                f"{listing}. Ask which one is meant; never guess.",
+            )
+        if matches:
+            return matches[0]
+        return candidate
+
+    def _remember(self, path: str) -> None:
+        """Keep recent paths (newest first) for bare-name disambiguation."""
+        entry = str(Path(path))
+        folded = entry.casefold()
+        self._recent = [item for item in self._recent if item.casefold() != folded]
+        self._recent.insert(0, entry)
+        del self._recent[self._RECENT_LIMIT :]
 
     def _track(self, path: str) -> None:
         """Remember the last path so later "this file" references work."""
         candidate = Path(path)
+        self._remember(str(candidate))
         self._last_item = str(candidate)
         if candidate.is_dir():
             self._last_folder = str(candidate)
@@ -194,8 +239,15 @@ class WindowsTools:
         )
 
     def _bulk_risk(self, source: Path, operation: str) -> OperationRisk:
-        """Risk for an operation on ``source``, escalated by item count."""
-        return validate_bulk_operation(windows_fs.count_items(source), operation)
+        """Risk for an operation on ``source``, escalated by item count.
+
+        ``count_items`` counts descendants, so an empty folder scores 0;
+        the folder itself is still the one item being touched, so the count
+        never drops below 1 (the policy's minimum).
+        """
+        return validate_bulk_operation(
+            max(windows_fs.count_items(source), 1), operation
+        )
 
     # ------------------------------------------------------------------
     # reading
@@ -243,9 +295,50 @@ class WindowsTools:
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["root"])
+        for hit in result["results"]:
+            # Every hit becomes disambiguation context for bare names.
+            self._remember(str(hit))
         if result["count"] == 1:
             # A single hit is the obvious referent for "it" / "this file".
             self._track(str(result["results"][0]))
+        return result
+
+    @function_tool()
+    async def read_file(self, context: RunContext, path: str) -> dict[str, object]:
+        """Read one file's text content (also extracts DOCX/PPTX/PDF text).
+
+        Binary files, spreadsheets, and oversized files are refused with a
+        stable code instead of dumping noise into the conversation.
+
+        Args:
+            path: What to read - full path, location name, relative name, or
+                a contextual reference like "this file".
+        """
+        try:
+            resolved = self._resolve(path)
+            result = await asyncio.to_thread(windows_fs.read_file, resolved)
+        except (WindowsFSError, SecurityPolicyError) as exc:
+            raise ToolError(str(exc)) from exc
+        self._track(result["path"])
+        return result
+
+    @function_tool()
+    async def inspect_tree(self, context: RunContext, path: str) -> dict[str, object]:
+        """Show a folder as a bounded tree with sizes, counts, and key files.
+
+        Depth and entry limits keep huge folders safe; junctions are listed
+        but never followed.
+
+        Args:
+            path: Which folder - full path, location name, relative name, or
+                a contextual reference like "that folder".
+        """
+        try:
+            resolved = self._resolve(path)
+            result = await asyncio.to_thread(windows_fs.inspect_tree, resolved)
+        except (WindowsFSError, SecurityPolicyError) as exc:
+            raise ToolError(str(exc)) from exc
+        self._track(result["path"])
         return result
 
     @function_tool()
@@ -354,6 +447,70 @@ class WindowsTools:
                 risk=OperationRisk.LOW_RISK,
             )
             result = await asyncio.to_thread(windows_fs.create_folder, resolved)
+        except (WindowsFSError, SecurityPolicyError) as exc:
+            raise ToolError(str(exc)) from exc
+        self._track(result["path"])
+        return result
+
+    @function_tool()
+    async def edit_file(
+        self,
+        context: RunContext,
+        path: str,
+        mode: str = "replace",
+        find: str = "",
+        replace: str = "",
+        append: str = "",
+    ) -> dict[str, object]:
+        """Change text inside an existing text file (replace or append).
+
+        Everything is checked before anything changes: missing files,
+        unsupported documents, binary files, and a find text that is not
+        present all fail BEFORE a confirmation is staged. The edit itself
+        requires the user's confirmation like every other MODERATE action,
+        and the result is verified by re-reading the file.
+
+        Args:
+            path: Which file - full path, location name, relative name, or
+                a contextual reference like "this file".
+            mode: "replace" (use find/replace) or "append" (add at the end).
+            find: Exact text to replace (mode "replace" only).
+            replace: The replacement text (mode "replace" only).
+            append: Text to add at the end (mode "append" only).
+        """
+        try:
+            resolved = self._resolve(path)
+            plan = await asyncio.to_thread(
+                windows_fs.plan_edit,
+                resolved,
+                mode=mode,
+                find=find,
+                replace=replace,
+                append=append,
+            )
+            src = Path(plan["path"])
+            if plan["mode"] == "replace":
+                description = (
+                    f"edit {src.name}: replace {plan['matches']} occurrence(s) "
+                    f"of {find!r} with {replace!r}"
+                )
+            else:
+                description = f"edit {src.name}: append text to the end"
+            self._ensure_confirmed(
+                operation="edit_file",
+                source=str(src),
+                destination=None,
+                description=description,
+                risk=self._bulk_risk(src, "edit_file"),
+            )
+            result = await asyncio.to_thread(
+                windows_fs.edit_file,
+                resolved,
+                mode=mode,
+                find=find,
+                replace=replace,
+                append=append,
+            )
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
         self._track(result["path"])
@@ -538,7 +695,12 @@ class WindowsTools:
                 risk=risk,
             )
             if permanent:
-                result = await asyncio.to_thread(windows_fs.delete_path, str(src))
+                # Folders must pass recursive=True or the engine refuses the
+                # deletion AFTER confirmation (a confirmed action that then
+                # fails); files keep the flag off so nothing changes there.
+                result = await asyncio.to_thread(
+                    windows_fs.delete_path, str(src), recursive=src.is_dir()
+                )
             else:
                 recycled = await asyncio.to_thread(windows_fs.recycle_path, str(src))
                 result = {
@@ -570,6 +732,7 @@ class WindowsTools:
             result = await asyncio.to_thread(windows_fs.open_path, resolved)
         except (WindowsFSError, SecurityPolicyError) as exc:
             raise ToolError(str(exc)) from exc
+        self._track(result["path"])
         return result
 
     @function_tool()

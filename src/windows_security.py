@@ -114,8 +114,10 @@ _OPERATION_POLICIES: dict[str, OperationPolicy] = {
     "list_directory": OperationPolicy(OperationRisk.READ),
     "search_files": OperationPolicy(OperationRisk.READ),
     "file_exists": OperationPolicy(OperationRisk.READ),
+    "folder_exists": OperationPolicy(OperationRisk.READ),
     "get_file_info": OperationPolicy(OperationRisk.READ),
     "read_file": OperationPolicy(OperationRisk.READ),
+    "inspect_tree": OperationPolicy(OperationRisk.READ),
     # LOW-RISK MODIFICATION
     "create_file": OperationPolicy(OperationRisk.LOW_RISK, writes_destination=True),
     "create_folder": OperationPolicy(OperationRisk.LOW_RISK, writes_destination=True),
@@ -124,6 +126,7 @@ _OPERATION_POLICIES: dict[str, OperationPolicy] = {
     "open_path": OperationPolicy(OperationRisk.LOW_RISK),
     "launch_application": OperationPolicy(OperationRisk.LOW_RISK),
     # MODERATE
+    "edit_file": OperationPolicy(OperationRisk.MODERATE, consumes_source=True),
     "move_path": OperationPolicy(
         OperationRisk.MODERATE,
         consumes_source=True,

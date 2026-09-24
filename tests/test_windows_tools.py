@@ -9,6 +9,7 @@ All filesystem activity happens in pytest temporary directories.
 
 from __future__ import annotations
 
+import os
 import sys
 from types import SimpleNamespace
 
@@ -22,11 +23,14 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows tool la
 EXPECTED_TOOL_NAMES = {
     "list_directory",
     "search_files",
+    "read_file",
+    "inspect_tree",
     "file_exists",
     "folder_exists",
     "get_file_info",
     "create_file",
     "create_folder",
+    "edit_file",
     "rename_path",
     "move_path",
     "copy_path",
@@ -734,3 +738,304 @@ async def test_confirm_windows_action_requires_a_code(tmp_path) -> None:
             destination="",
         )
     assert target.exists()
+
+
+# ----------------------------------------------------------------------
+# Part 7: reading, trees, editing, folder search, ambiguity
+# ----------------------------------------------------------------------
+async def test_read_file_tool_returns_content_and_tracks_it(tmp_path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("hello world", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+    result = await tools.read_file(context, path=str(target))
+    assert "hello world" in str(result["content"])
+    assert tools._last_item.endswith("note.txt")
+    assert tools._last_file.endswith("note.txt")
+
+
+async def test_read_file_tool_maps_errors_to_tool_error(tmp_path) -> None:
+    target = tmp_path / "blob.dat"
+    target.write_bytes(b"MZ\x00\x01")
+    with pytest.raises(ToolError) as excinfo:
+        await _call("read_file", path=str(target))
+    assert "UNSUPPORTED" in str(excinfo.value)
+
+
+async def test_inspect_tree_tool_sets_folder_context(tmp_path) -> None:
+    (tmp_path / "sub").mkdir()
+    tools = WindowsTools()
+    context = make_context()
+    result = await tools.inspect_tree(context, path=str(tmp_path))
+    assert "sub" in str(result["tree"])
+    folder_name = os.path.basename(str(tmp_path).rstrip("\\/"))
+    assert tools._last_folder.endswith(folder_name)
+    assert tools._context_dir.endswith(folder_name)
+
+
+async def test_edit_file_stages_then_executes(tmp_path) -> None:
+    target = tmp_path / "app.cfg"
+    target.write_text("x=1", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+
+    # 1) first attempt stages: nothing on disk changes yet
+    with pytest.raises(ToolError) as excinfo:
+        await tools.edit_file(
+            context, path=str(target), mode="replace", find="1", replace="2"
+        )
+    message = str(excinfo.value)
+    assert "token" in message
+    assert target.read_text(encoding="utf-8") == "x=1"
+
+    # 2) the user confirms with the six-digit code
+    token = message.split("'")[1]
+    code = tools._manager.pending()[-1].code
+    confirmation = await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="edit_file",
+        code=code,
+        source=str(target),
+        destination="",
+    )
+    assert "confirmed" in confirmation.casefold()
+
+    # 3) the retried edit now executes and is verified
+    result = await tools.edit_file(
+        context, path=str(target), mode="replace", find="1", replace="2"
+    )
+    assert result["replaced"] == 1
+    assert result["verified"] is True
+    assert target.read_text(encoding="utf-8") == "x=2"
+
+
+async def test_edit_file_find_missing_fails_before_staging(tmp_path) -> None:
+    target = tmp_path / "app.cfg"
+    target.write_text("x=1", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+    with pytest.raises(ToolError) as excinfo:
+        await tools.edit_file(
+            context, path=str(target), mode="replace", find="zzz", replace="q"
+        )
+    message = str(excinfo.value)
+    assert "NO_MATCH" in message
+    assert "token" not in message
+    assert tools._manager.pending() == ()
+    assert target.read_text(encoding="utf-8") == "x=1"
+
+
+async def test_edit_file_confirm_payload_must_match(tmp_path) -> None:
+    target = tmp_path / "app.cfg"
+    target.write_text("x=1", encoding="utf-8")
+    other = tmp_path / "other.cfg"
+    other.write_text("y=9", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+    with pytest.raises(ToolError) as excinfo:
+        await tools.edit_file(
+            context, path=str(target), mode="replace", find="1", replace="2"
+        )
+    token = str(excinfo.value).split("'")[1]
+    code = tools._manager.pending()[-1].code
+
+    with pytest.raises(ToolError):
+        await tools.confirm_windows_action(
+            context,
+            token=token,
+            operation="edit_file",
+            code=code,
+            source=str(other),
+            destination="",
+        )
+    # the mismatched approval never unlocks anything
+    assert tools._manager.pending()
+    assert target.read_text(encoding="utf-8") == "x=1"
+
+
+async def test_delete_folder_tool_passes_recursive_flag(tmp_path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("n", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.delete_path(context, path=str(folder), permanent=True)
+    message = str(excinfo.value)
+    assert "token" in message
+    token = message.split("'")[1]
+    code = tools._manager.pending()[-1].code
+    await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="delete_path",
+        code=code,
+        source=str(folder),
+        destination="",
+    )
+    result = await tools.delete_path(context, path=str(folder), permanent=True)
+    assert result["method"] == "permanent"
+    assert not folder.exists()
+
+
+async def test_recycle_folder_tool(tmp_path) -> None:
+    folder = tmp_path / "old-stuff"
+    folder.mkdir()
+    (folder / "junk.txt").write_text("x", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.recycle_path(context, path=str(folder))
+    token = str(excinfo.value).split("'")[1]
+    code = tools._manager.pending()[-1].code
+    await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="recycle_path",
+        code=code,
+        source=str(folder),
+        destination="",
+    )
+    result = await tools.recycle_path(context, path=str(folder))
+    assert result["recycled"] is True
+    assert not folder.exists()
+
+
+async def test_recycle_empty_folder_tool(tmp_path) -> None:
+    folder = tmp_path / "empty-folder"
+    folder.mkdir()
+    tools = WindowsTools()
+    context = make_context()
+
+    # an empty folder still counts as the one item being recycled, so the
+    # normal staged confirmation flow must work (not "item count < 1")
+    with pytest.raises(ToolError) as excinfo:
+        await tools.recycle_path(context, path=str(folder))
+    message = str(excinfo.value)
+    assert "token" in message
+    assert folder.exists()  # staged, nothing gone yet
+
+    token = message.split("'")[1]
+    code = tools._manager.pending()[-1].code
+    await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="recycle_path",
+        code=code,
+        source=str(folder),
+        destination="",
+    )
+    result = await tools.recycle_path(context, path=str(folder))
+    assert result["recycled"] is True
+    assert not folder.exists()
+
+
+async def test_delete_empty_folder_permanently_tool(tmp_path) -> None:
+    folder = tmp_path / "empty-to-delete"
+    folder.mkdir()
+    tools = WindowsTools()
+    context = make_context()
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.delete_path(context, path=str(folder), permanent=True)
+    message = str(excinfo.value)
+    assert "token" in message
+    assert folder.exists()
+
+    token = message.split("'")[1]
+    code = tools._manager.pending()[-1].code
+    await tools.confirm_windows_action(
+        context,
+        token=token,
+        operation="delete_path",
+        code=code,
+        source=str(folder),
+        destination="",
+    )
+    result = await tools.delete_path(context, path=str(folder), permanent=True)
+    assert result["method"] == "permanent"
+    assert not folder.exists()
+
+
+async def test_rename_empty_folder_tool(tmp_path) -> None:
+    folder = tmp_path / "old-empty"
+    folder.mkdir()
+    tools = WindowsTools()
+    context = make_context()
+
+    # LOW-RISK rename of an empty folder executes directly: a zero
+    # descendant count must never be rejected as "item count < 1"
+    result = await tools.rename_path(context, source=str(folder), new_name="new-empty")
+    assert (tmp_path / "new-empty").is_dir()
+    assert not folder.exists()
+    assert str(result["to"]).endswith("new-empty")
+
+
+async def test_search_files_tool_includes_folders(tmp_path) -> None:
+    (tmp_path / "meeting-notes").mkdir()
+    (tmp_path / "meeting.txt").write_text("x", encoding="utf-8")
+    result = await _call("search_files", root=str(tmp_path), pattern="meeting")
+    names = {os.path.basename(item) for item in result["results"]}
+    assert names == {"meeting-notes", "meeting.txt"}
+    assert result["count"] == 2
+
+
+async def test_ambiguous_bare_name_lists_candidates(tmp_path) -> None:
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    alpha.mkdir()
+    beta.mkdir()
+    (alpha / "part7-note.txt").write_text("a", encoding="utf-8")
+    (beta / "part7-note.txt").write_text("b", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+    tools._recent = [
+        str(alpha / "part7-note.txt"),
+        str(beta / "part7-note.txt"),
+    ]
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.get_file_info(context, path="part7-note.txt")
+    message = str(excinfo.value)
+    assert "AMBIGUOUS" in message
+    assert "alpha" in message.casefold()
+    assert "beta" in message.casefold()
+
+
+async def test_single_recent_match_resolves(tmp_path) -> None:
+    folder = tmp_path / "inbox"
+    folder.mkdir()
+    target = folder / "part7-single.txt"
+    target.write_text("hi", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+    tools._recent = [str(target)]
+
+    result = await tools.get_file_info(context, path="part7-single.txt")
+    assert "inbox" in str(result["path"])
+
+
+async def test_existing_path_wins_over_recent_matches(tmp_path) -> None:
+    alpha = tmp_path / "alpha"
+    beta = tmp_path / "beta"
+    gamma = tmp_path / "gamma"
+    for folder in (alpha, beta, gamma):
+        folder.mkdir()
+    primary = alpha / "part7-primary.txt"
+    primary.write_text("p", encoding="utf-8")
+    (beta / "part7-primary.txt").write_text("b", encoding="utf-8")
+    (gamma / "part7-primary.txt").write_text("g", encoding="utf-8")
+    tools = WindowsTools()
+    context = make_context()
+    tools._context_dir = str(alpha)
+    tools._recent = [
+        str(beta / "part7-primary.txt"),
+        str(gamma / "part7-primary.txt"),
+    ]
+
+    # the real file at the resolved path always wins over ambiguity
+    result = await tools.get_file_info(context, path="part7-primary.txt")
+    assert "alpha" in str(result["path"])

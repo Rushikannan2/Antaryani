@@ -15,7 +15,8 @@ Layering contract:
 * Operational problems raise ``WindowsFSError`` with a stable ``code``:
   NOT_FOUND, ALREADY_EXISTS, CONFLICT, INVALID_NAME, ACCESS_DENIED,
   NEEDS_RECURSIVE, VERIFY_FAILED, BLOCKED, UNKNOWN_APP, APP_MISSING,
-  OS_ERROR - so tools can return structured, user-friendly errors.
+  NO_MATCH, TOO_LARGE, UNSUPPORTED, OS_ERROR - so tools can return
+  structured, user-friendly errors.
 * Every modification is verified after the fact: a write that silently
   failed raises VERIFY_FAILED instead of reporting success.
 * There is no shell access anywhere in this module. Opening files uses
@@ -28,11 +29,14 @@ Layering contract:
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import os
 import shutil
+import zipfile
 from datetime import datetime
 from pathlib import Path
+from xml.etree import ElementTree
 
 from send2trash import send2trash
 
@@ -48,6 +52,13 @@ from windows_security import (
 # huge folder cannot flood the model's context.
 MAX_LIST_ENTRIES = 200
 MAX_SEARCH_RESULTS = 50
+# Reading: files over MAX_READ_BYTES are refused (TOO_LARGE) and returned
+# text is capped at MAX_READ_CHARS. Trees: bounded depth and entry budgets
+# keep huge folders - and junction loops - from ever running away.
+MAX_READ_BYTES = 2_000_000
+MAX_READ_CHARS = 200_000
+MAX_TREE_DEPTH = 5
+MAX_TREE_ENTRIES = 400
 
 # Opening these would execute programs, so open_path refuses them. Launching
 # applications is only possible through launch_application's fixed allowlist.
@@ -98,24 +109,54 @@ _APPLICATION_FIXED_PATHS: dict[str, tuple[str, ...]] = {
         r"%ProgramFiles%\Microsoft VS Code\Code.exe",
         r"%ProgramFiles(x86)%\Microsoft VS Code\Code.exe",
     ),
+    # Microsoft Office (Part 7): fixed Program Files locations only - the
+    # model never supplies a path or arguments, only one of these names.
+    "word": (
+        r"%ProgramFiles%\Microsoft Office\root\Office16\WINWORD.EXE",
+        r"%ProgramFiles%\Microsoft Office\Office16\WINWORD.EXE",
+        r"%ProgramFiles(x86)%\Microsoft Office\root\Office16\WINWORD.EXE",
+        r"%ProgramFiles(x86)%\Microsoft Office\Office16\WINWORD.EXE",
+    ),
+    "powerpoint": (
+        r"%ProgramFiles%\Microsoft Office\root\Office16\POWERPNT.EXE",
+        r"%ProgramFiles%\Microsoft Office\Office16\POWERPNT.EXE",
+        r"%ProgramFiles(x86)%\Microsoft Office\root\Office16\POWERPNT.EXE",
+        r"%ProgramFiles(x86)%\Microsoft Office\Office16\POWERPNT.EXE",
+    ),
+    "excel": (
+        r"%ProgramFiles%\Microsoft Office\root\Office16\EXCEL.EXE",
+        r"%ProgramFiles%\Microsoft Office\Office16\EXCEL.EXE",
+        r"%ProgramFiles(x86)%\Microsoft Office\root\Office16\EXCEL.EXE",
+        r"%ProgramFiles(x86)%\Microsoft Office\Office16\EXCEL.EXE",
+    ),
 }
 
 _LAUNCH_ALIASES: dict[str, str] = {
     "code": "vs code",
     "vscode": "vs code",
     "visual studio code": "vs code",
+    "microsoft word": "word",
+    "ms word": "word",
+    "winword": "word",
+    "microsoft powerpoint": "powerpoint",
+    "ms powerpoint": "powerpoint",
+    "powerpnt": "powerpoint",
+    "microsoft excel": "excel",
+    "ms excel": "excel",
 }
 
 
 def _application_candidates(name: str) -> list[Path]:
     """Fixed candidate paths for an allowlisted application (no user input)."""
-    executable = ALLOWED_APPLICATIONS.get(name)
+    key = name.strip().casefold()
+    key = _LAUNCH_ALIASES.get(key, key)
+    executable = ALLOWED_APPLICATIONS.get(key)
     if executable is not None:
         system_root = Path(os.environ.get("WINDIR", "C:\\Windows"))
         return [system_root / "System32" / executable]
     return [
         Path(os.path.expandvars(template))
-        for template in _APPLICATION_FIXED_PATHS.get(name, ())
+        for template in _APPLICATION_FIXED_PATHS.get(key, ())
     ]
 
 
@@ -353,7 +394,10 @@ def _require_directory(path: str | Path) -> Path:
 # Thin wrappers over the mutating primitives so tests can prove the
 # post-operation verification actually catches silent failures.
 def _write_text(path: Path, data: str) -> None:
-    path.write_text(data, encoding="utf-8")
+    # newline="" writes byte-for-byte: no CRLF translation, so editing a
+    # CRLF file changes only the edited region.
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(data)
 
 
 def _mkdir(path: Path) -> None:
@@ -388,11 +432,30 @@ def _iter_directory(path: Path) -> list[Path]:
     return list(path.iterdir())
 
 
-def _walk_files(root: Path):
-    """Yield every file under ``root``, silently skipping denied folders."""
-    for folder, _dirs, files in os.walk(root, onerror=lambda _err: None):
-        for file_name in files:
-            yield Path(folder) / file_name
+def _is_reparse_point(path: Path) -> bool:
+    """True for junctions/symlinks: they are listed but never followed."""
+    try:
+        attributes = path.lstat().st_file_attributes
+    except OSError:
+        return False
+    return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _walk_entries(root: Path):
+    """Yield files AND folders under ``root`` without following junctions.
+
+    Reparse points are yielded as entries so their names can match a
+    search, but they are pruned from ``dirs`` in place so a junction loop
+    can never hang the walk.
+    """
+    for folder, dirs, files in os.walk(root, onerror=lambda _err: None):
+        base = Path(folder)
+        all_dirs = list(dirs)
+        dirs[:] = [name for name in all_dirs if not _is_reparse_point(base / name)]
+        for name in all_dirs:
+            yield base / name
+        for name in files:
+            yield base / name
 
 
 def _recycle(path: Path) -> None:
@@ -468,7 +531,7 @@ def search_files(
     recursive: bool = True,
     max_results: int = MAX_SEARCH_RESULTS,
 ) -> dict[str, object]:
-    """Find files by name: plain text matches anywhere, ``*.ext`` wildcards."""
+    """Find files or folders by name: plain text anywhere, ``*.ext`` wildcards."""
     resolved_root = _require_directory(root)
     if not isinstance(pattern, str) or not pattern.strip():
         raise WindowsFSError("INVALID_NAME", "Say what file name to look for.")
@@ -487,11 +550,9 @@ def search_files(
         return needle in lowered
 
     if recursive:
-        candidates = _walk_files(resolved_root)
+        candidates = _walk_entries(resolved_root)
     else:
-        candidates = (
-            entry for entry in _iter_directory(resolved_root) if entry.is_file()
-        )
+        candidates = _iter_directory(resolved_root)
 
     results: list[str] = []
     truncated = False
@@ -554,6 +615,376 @@ def get_file_info(path: str | Path) -> dict[str, object]:
         "extension": resolved.suffix.casefold(),
         "read_only": bool(attributes & 0x1),
         "hidden": bool(attributes & 0x2) or resolved.name.startswith("."),
+    }
+
+
+# ----------------------------------------------------------------------
+# reading files, documents, and folder trees (Part 7)
+# ----------------------------------------------------------------------
+def _read_bytes(path: Path) -> bytes:
+    """Read a file's raw bytes, mapping failures to stable codes."""
+    try:
+        return path.read_bytes()
+    except PermissionError as exc:
+        raise WindowsFSError("ACCESS_DENIED", f"Access denied: {path}") from exc
+    except OSError as exc:
+        raise WindowsFSError("OS_ERROR", f"Could not read {path}: {exc}") from exc
+
+
+def _decode_text(raw: bytes, path: Path) -> str:
+    """Decode UTF-8 text; refuse binary content instead of dumping it."""
+    if b"\x00" in raw[:8192]:
+        raise WindowsFSError("UNSUPPORTED", f"{path} is a binary file, not text.")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise WindowsFSError("UNSUPPORTED", f"{path} is not UTF-8 text.") from exc
+
+
+def _extract_docx(path: Path) -> str:
+    """Paragraph text of a .docx, in document order."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            xml = archive.read("word/document.xml")
+    except (zipfile.BadZipFile, KeyError, OSError) as exc:
+        raise WindowsFSError(
+            "UNSUPPORTED", f"{path} is not a readable Word document."
+        ) from exc
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError as exc:
+        raise WindowsFSError(
+            "UNSUPPORTED", f"{path} is not a readable Word document."
+        ) from exc
+    paragraphs: list[str] = []
+    for element in root.iter():
+        if element.tag.endswith("}p"):
+            texts = [
+                child.text or "" for child in element.iter() if child.tag.endswith("}t")
+            ]
+            paragraphs.append("".join(texts))
+    return "\n".join(paragraphs)
+
+
+def _extract_pptx(path: Path) -> str:
+    """Per-slide text of a .pptx, slides in numeric order."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            slide_names = [
+                name
+                for name in archive.namelist()
+                if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+            ]
+            slide_names.sort(
+                key=lambda name: int(
+                    "".join(ch for ch in Path(name).stem if ch.isdigit()) or 0
+                )
+            )
+            parts: list[str] = []
+            for position, name in enumerate(slide_names, start=1):
+                try:
+                    root = ElementTree.fromstring(archive.read(name))
+                except ElementTree.ParseError as exc:
+                    raise WindowsFSError(
+                        "UNSUPPORTED", f"{path} is not a readable slideshow."
+                    ) from exc
+                texts = [
+                    element.text or ""
+                    for element in root.iter()
+                    if element.tag.endswith("}t")
+                ]
+                parts.append(f"--- slide {position} ---\n" + "\n".join(texts))
+    except (zipfile.BadZipFile, KeyError, OSError) as exc:
+        raise WindowsFSError(
+            "UNSUPPORTED", f"{path} is not a readable slideshow."
+        ) from exc
+    return "\n\n".join(parts)
+
+
+def _extract_pdf(path: Path) -> str:
+    """Text of a PDF, or an honest note when there is no text layer."""
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise WindowsFSError(
+            "UNSUPPORTED", "PDF reading needs the pypdf package."
+        ) from exc
+    try:
+        reader = PdfReader(str(path))
+        if reader.is_encrypted:
+            raise WindowsFSError(
+                "UNSUPPORTED", f"{path} is password-protected; not readable."
+            )
+        text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+    except WindowsFSError:
+        raise
+    except Exception as exc:
+        raise WindowsFSError(
+            "UNSUPPORTED", f"Could not extract the text of {path}."
+        ) from exc
+    return text or "(this PDF has no extractable text)"
+
+
+# Documents are read by extraction and NEVER edited as text here;
+# spreadsheets and legacy binaries are refused outright.
+_UNREADABLE_EXTENSIONS = frozenset({".doc", ".ppt", ".xlsx", ".xls"})
+_DOCUMENT_EXTENSIONS = frozenset(
+    {".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".pdf"}
+)
+
+
+def read_file(path: str | Path) -> dict[str, object]:
+    """Read a text file's contents, extracting text from documents too."""
+    resolved = require_source(path, operation="read_file")
+    if not resolved.is_file():
+        raise WindowsFSError("NOT_FOUND", f"Not a file: {resolved}")
+    try:
+        size = resolved.stat().st_size
+    except OSError as exc:
+        raise WindowsFSError(
+            "OS_ERROR", f"Could not inspect {resolved}: {exc}"
+        ) from exc
+    if size > MAX_READ_BYTES:
+        raise WindowsFSError(
+            "TOO_LARGE",
+            f"{resolved} is {size} bytes; refusing to read files over "
+            f"{MAX_READ_BYTES} bytes.",
+        )
+    extension = resolved.suffix.casefold()
+    kind = "text"
+    if extension == ".docx":
+        kind = "docx"
+        text = _extract_docx(resolved)
+    elif extension == ".pptx":
+        kind = "pptx"
+        text = _extract_pptx(resolved)
+    elif extension == ".pdf":
+        kind = "pdf"
+        text = _extract_pdf(resolved)
+    elif extension in _UNREADABLE_EXTENSIONS:
+        raise WindowsFSError(
+            "UNSUPPORTED",
+            f"Cannot read {extension} files as text; open it with open_path "
+            "or launch the matching application instead.",
+        )
+    else:
+        text = _decode_text(_read_bytes(resolved), resolved)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    truncated = False
+    if len(text) > MAX_READ_CHARS:
+        text = text[:MAX_READ_CHARS]
+        truncated = True
+    return {
+        "path": str(resolved),
+        "name": resolved.name,
+        "extension": extension,
+        "kind": kind,
+        "size_bytes": size,
+        "content": text,
+        "lines": len(text.splitlines()),
+        "truncated": truncated,
+    }
+
+
+def _is_important_file(name: str) -> bool:
+    """Well-known project files worth surfacing in a tree overview."""
+    lowered = name.casefold()
+    return lowered.startswith(("readme", "license")) or lowered in {
+        "pyproject.toml",
+        "package.json",
+        "requirements.txt",
+        "setup.py",
+        "makefile",
+        "dockerfile",
+    }
+
+
+def inspect_tree(
+    path: str | Path,
+    *,
+    max_depth: int | None = None,
+    max_entries: int | None = None,
+) -> dict[str, object]:
+    """Draw a folder as a bounded tree: sizes, counts, and key files.
+
+    Depth and entry limits (``MAX_TREE_DEPTH`` / ``MAX_TREE_ENTRIES``)
+    keep huge folders safe; junctions are listed but never followed, so a
+    junction loop can never run away.
+    """
+    root = _require_directory(path)
+    depth_limit = MAX_TREE_DEPTH if max_depth is None else max_depth
+    entry_limit = MAX_TREE_ENTRIES if max_entries is None else max_entries
+    lines: list[str] = [root.name or str(root)]
+    files = 0
+    folders = 0
+    skipped = 0
+    entries_seen = 0
+    total_size = 0
+    truncated = False
+    extensions: dict[str, int] = {}
+    important: list[str] = []
+
+    def walk(current: Path, prefix: str, depth: int) -> None:
+        nonlocal files, folders, skipped, entries_seen, total_size, truncated
+        try:
+            children = sorted(current.iterdir(), key=lambda item: item.name.casefold())
+        except OSError:
+            skipped += 1  # unreadable folder: counted, never fatal
+            return
+        for index, child in enumerate(children):
+            if entries_seen >= entry_limit:
+                truncated = True
+                return
+            entries_seen += 1
+            last = index == len(children) - 1
+            branch = "\u2514\u2500\u2500 " if last else "\u251c\u2500\u2500 "
+            try:
+                reparse = _is_reparse_point(child)
+                is_dir = False if reparse else child.is_dir()
+            except OSError:
+                skipped += 1
+                lines.append(prefix + branch + child.name)
+                continue
+            lines.append(prefix + branch + child.name)
+            if reparse:
+                skipped += 1  # junction/symlink: listed, never followed
+                continue
+            if is_dir:
+                folders += 1
+                if depth >= depth_limit:
+                    try:
+                        if next(child.iterdir(), None) is not None:
+                            truncated = True
+                    except OSError:
+                        pass
+                    continue
+                walk(
+                    child,
+                    prefix + ("    " if last else "\u2502   "),
+                    depth + 1,
+                )
+            else:
+                files += 1
+                with contextlib.suppress(OSError):
+                    total_size += child.stat().st_size
+                suffix = child.suffix.casefold()
+                if suffix:
+                    extensions[suffix] = extensions.get(suffix, 0) + 1
+                if len(important) < 10 and _is_important_file(child.name):
+                    important.append(child.name)
+
+    walk(root, "", 0)
+    return {
+        "path": str(root),
+        "tree": "\n".join(lines),
+        "files": files,
+        "folders": folders,
+        "total_size_bytes": total_size,
+        "extensions": dict(sorted(extensions.items())),
+        "important_files": important,
+        "truncated": truncated,
+        "skipped": skipped,
+    }
+
+
+# ----------------------------------------------------------------------
+# editing text files (Part 7)
+# ----------------------------------------------------------------------
+def plan_edit(
+    path: str | Path,
+    *,
+    mode: str = "replace",
+    find: str = "",
+    replace: str = "",
+    append: str = "",
+) -> dict[str, object]:
+    """Preflight an edit: policy, mode, decodability, size, matches.
+
+    Runs BEFORE any confirmation is staged so the user is never asked to
+    approve an edit that could not succeed. Nothing is ever written here.
+    """
+    src = require_source(path, operation="edit_file")
+    if not src.is_file():
+        raise WindowsFSError("NOT_FOUND", f"Not a file: {src}")
+    if not isinstance(mode, str) or mode.strip().casefold() not in (
+        "replace",
+        "append",
+    ):
+        raise WindowsFSError("INVALID_NAME", "Edit mode must be 'replace' or 'append'.")
+    normalized = mode.strip().casefold()
+    if src.suffix.casefold() in _DOCUMENT_EXTENSIONS:
+        raise WindowsFSError(
+            "UNSUPPORTED",
+            f"{src.suffix} documents are never edited as text here; open the "
+            "application instead.",
+        )
+    try:
+        size = src.stat().st_size
+    except OSError as exc:
+        raise WindowsFSError("OS_ERROR", f"Could not inspect {src}: {exc}") from exc
+    if size > MAX_READ_BYTES:
+        raise WindowsFSError(
+            "TOO_LARGE",
+            f"{src} is {size} bytes; refusing to edit files over "
+            f"{MAX_READ_BYTES} bytes.",
+        )
+    text = _decode_text(_read_bytes(src), src)
+    matches = 0
+    if normalized == "replace":
+        if not isinstance(find, str) or not find:
+            raise WindowsFSError("INVALID_NAME", "Say the exact text to replace.")
+        if not isinstance(replace, str):
+            raise WindowsFSError("INVALID_NAME", "The replacement must be text.")
+        matches = text.count(find)
+        if matches == 0:
+            raise WindowsFSError(
+                "NO_MATCH",
+                f"{find!r} was not found in {src}; nothing was changed.",
+            )
+    elif not isinstance(append, str) or not append:
+        raise WindowsFSError("INVALID_NAME", "Say the text to append.")
+    return {"path": str(src), "mode": normalized, "matches": matches}
+
+
+def edit_file(
+    path: str | Path,
+    *,
+    mode: str = "replace",
+    find: str = "",
+    replace: str = "",
+    append: str = "",
+) -> dict[str, object]:
+    """Replace or append text in an existing text file, then verify it.
+
+    ``plan_edit`` validates everything first; this performs the actual
+    read-before-write, writes byte-for-byte (no newline translation), and
+    re-reads the file so a silently failed write raises VERIFY_FAILED
+    instead of reporting success.
+    """
+    plan = plan_edit(path, mode=mode, find=find, replace=replace, append=append)
+    src = Path(plan["path"])
+    text = _decode_text(_read_bytes(src), src)
+    if plan["mode"] == "replace":
+        updated = text.replace(find, replace)
+        replaced = int(plan["matches"])
+    else:
+        updated = text + append
+        replaced = 0
+    try:
+        _write_text(src, updated)
+    except PermissionError as exc:
+        raise WindowsFSError("ACCESS_DENIED", f"Access denied: {src}") from exc
+    except OSError as exc:
+        raise WindowsFSError("OS_ERROR", f"Could not write {src}: {exc}") from exc
+    if _decode_text(_read_bytes(src), src) != updated:
+        raise WindowsFSError(
+            "VERIFY_FAILED", f"The edit to {src} could not be verified."
+        )
+    return {
+        "path": str(src),
+        "mode": plan["mode"],
+        "replaced": replaced,
+        "verified": True,
     }
 
 

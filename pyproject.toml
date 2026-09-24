@@ -12,6 +12,7 @@ dependencies = [
     "livekit-agents[google,images]~=1.8",
     "livekit-plugins-ai-coustics~=0.3",
     "playwright>=1.63.0",
+    "pypdf>=6.19.0",
     "python-dotenv",
     "send2trash>=2.1.0",
 ]
