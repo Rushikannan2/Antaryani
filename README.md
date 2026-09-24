@@ -203,6 +203,14 @@ A production-ready [Dockerfile](Dockerfile) is included. Deploy to LiveKit Cloud
 
 ---
 
+## Attribution
+
+Srilatha was developed by Rushikannan2 as a personal voice-driven Windows AI assistant.
+
+The project is built on the LiveKit agent-starter-python template. LiveKit provides the underlying agent framework/infrastructure; the Srilatha-specific Windows computer-control layer, security and confirmation model, browser automation, multilingual butler behavior, testing, and application logic were developed for this project.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
