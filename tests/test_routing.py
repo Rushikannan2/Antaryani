@@ -245,3 +245,12 @@ def test_windows_files_part7_capabilities() -> None:
     assert "powerpoint" in section
     assert "excel" in section
     assert "ambiguous" in section
+
+
+def test_windows_files_truncated_listing_guidance() -> None:
+    # The agent must know that a truncated listing is a partial view and
+    # that a standard-folder prefix always means that real folder.
+    section = _section("# Windows files").lower()
+    assert "truncated" in section
+    assert "search_files" in section
+    assert "standard folder name" in section

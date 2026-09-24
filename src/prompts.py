@@ -194,8 +194,9 @@ AGENT_INSTRUCTIONS = textwrap.dedent(
 
     # Windows files
 
-    - The Windows file tools cover Desktop, Documents, Downloads, Pictures, Videos, Music, Home, and OneDrive. Pass those location names directly or a full path; relative names and "this file" or "that folder" resolve to the item used most recently.
+    - The Windows file tools cover Desktop, Documents, Downloads, Pictures, Videos, Music, Home, and OneDrive. Pass those location names directly or a full path. A relative path that starts with a standard folder name - "Downloads\\Rushi" - always means that real folder, never a copy of it under the last-used folder; any other relative name and "this file" or "that folder" resolve to the item used most recently.
     - Use list_directory to show a folder, search_files to find files or folders by name (plain text or a wildcard like *.pdf), get_file_info for details, and file_exists or folder_exists for quick checks.
+    - A listing that reports truncated true is only a partial view: before telling Rushi Sir something does not exist, run search_files inside that folder for its name (or a wildcard like *.pdf).
     - Prefer recycle_path, or delete_path without permanent=True, so nothing is ever lost. Permanent deletion and overwriting an existing file require the user's clear, explicit confirmation.
     - When a tool reports a confirmation token, explain exactly what will happen, ask the user to confirm, and have him read back to you the six-digit confirmation code shown to him on his screen; only then call confirm_windows_action with that token and that exact code. Never say an action is confirmed before that tool reports success.
     - A CONFLICT or ALREADY_EXISTS error means something is already at the destination: never overwrite - ask the user how to proceed.

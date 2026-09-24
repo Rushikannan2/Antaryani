@@ -182,6 +182,34 @@ def test_folder_we_created_phrases(tmp_path) -> None:
         assert resolve_user_path(phrase, context_folder=last_folder) == last_folder
 
 
+def test_resolve_known_folder_prefix_beats_stale_context() -> None:
+    downloads = resolve_known_folder("downloads")
+    expected = str(downloads / "Rushi")
+    assert (
+        resolve_user_path("Downloads\\Rushi", context_dir="C:\\stale\\ctx") == expected
+    )
+    assert (
+        resolve_user_path("Downloads/Rushi", context_dir="C:\\stale\\ctx") == expected
+    )
+    assert resolve_user_path("Downloads\\", context_dir="C:\\stale\\ctx") == str(
+        downloads
+    )
+
+
+def test_resolve_known_folder_prefix_articles_and_synonyms() -> None:
+    assert resolve_user_path("my documents\\a.txt", context_dir="C:\\stale") == str(
+        resolve_known_folder("documents") / "a.txt"
+    )
+    assert resolve_user_path("photos\\cat.png", context_dir="C:\\stale") == str(
+        resolve_known_folder("pictures") / "cat.png"
+    )
+
+
+def test_resolve_plain_relative_still_uses_context(tmp_path) -> None:
+    resolved = resolve_user_path("sub\\file.txt", context_dir=str(tmp_path))
+    assert resolved == str(tmp_path / "sub" / "file.txt")
+
+
 # ----------------------------------------------------------------------
 # list_directory
 # ----------------------------------------------------------------------
@@ -219,6 +247,20 @@ def test_list_directory_caps_entries(tmp_path) -> None:
     for index in range(MAX_LIST_ENTRIES + 5):
         (tmp_path / f"f{index:04d}.tmp").write_text("", encoding="utf-8")
     result = list_directory(str(tmp_path))
+    assert result["count"] == MAX_LIST_ENTRIES
+    assert result["truncated"] is True
+
+
+def test_list_directory_shows_folders_before_capped_files(tmp_path) -> None:
+    # A folder name sorting after hundreds of files must never be silently
+    # cut by the cap: navigation targets are listed before files.
+    for index in range(MAX_LIST_ENTRIES + 5):
+        (tmp_path / f"f{index:04d}.tmp").write_text("", encoding="utf-8")
+    (tmp_path / "zz-final-sub").mkdir()
+    result = list_directory(str(tmp_path))
+    names = [entry["name"] for entry in result["entries"]]
+    assert names[0] == "zz-final-sub"
+    assert "zz-final-sub" in names
     assert result["count"] == MAX_LIST_ENTRIES
     assert result["truncated"] is True
 
@@ -286,6 +328,29 @@ def test_search_caps_results(tmp_path) -> None:
     for index in range(MAX_SEARCH_RESULTS + 3):
         (tmp_path / f"hit{index:03d}.log").write_text("", encoding="utf-8")
     result = search_files(str(tmp_path), "hit")
+    assert result["count"] == MAX_SEARCH_RESULTS
+    assert result["truncated"] is True
+
+
+def test_search_exact_name_match_ranked_first(tmp_path) -> None:
+    # An item literally named like the query is what the user asked for; it
+    # must survive the result cap even when dozens of substring matches
+    # would otherwise fill it in walk order.
+    for index in range(MAX_SEARCH_RESULTS + 5):
+        (tmp_path / f"aaa-rushi-{index:03d}.txt").write_text("", encoding="utf-8")
+    (tmp_path / "Rushi").mkdir()
+    result = search_files(str(tmp_path), "rushi")
+    assert result["count"] == MAX_SEARCH_RESULTS
+    assert os.path.basename(result["results"][0]) == "Rushi"
+    assert result["truncated"] is True
+
+
+def test_search_truncated_when_exact_displaces_a_result(tmp_path) -> None:
+    for index in range(MAX_SEARCH_RESULTS):
+        (tmp_path / f"aaa-hit-{index:03d}.log").write_text("", encoding="utf-8")
+    (tmp_path / "hit").mkdir()
+    result = search_files(str(tmp_path), "hit")
+    assert os.path.basename(result["results"][0]) == "hit"
     assert result["count"] == MAX_SEARCH_RESULTS
     assert result["truncated"] is True
 

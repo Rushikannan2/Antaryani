@@ -318,9 +318,11 @@ def resolve_user_path(
     Accepts standard-location names ("Desktop", "my documents", "photos"),
     contextual references ("this file", "that folder", bare "it",
     "previous file", "the folder we created"), quoted or plain absolute
-    paths, and relative names (resolved against the last-used directory,
-    falling back to the user's home). The result is only an absolute
-    CANDIDATE: the security policy still validates it afterwards.
+    paths, and relative names - one starting with a standard folder name
+    (``Downloads\\Rushi``) always means that folder; any other resolves
+    against the last-used directory, falling back to the user's home.
+    The result is only an absolute CANDIDATE: the security policy still
+    validates it afterwards.
     """
     if not isinstance(raw, str) or not raw.strip():
         raise WindowsFSError("INVALID_NAME", "Say a location or file name.")
@@ -359,6 +361,18 @@ def resolve_user_path(
     candidate = Path(value)
     if candidate.is_absolute():
         return value
+    # "Downloads\Rushi": the first segment names a standard folder, so it
+    # means THAT real folder - joining it onto the last-used directory used
+    # to double the segment (...\Downloads\Rushi\Downloads\Rushi) and made
+    # every later reference to the item fail as NOT_FOUND.
+    segments = [part for part in value.replace("/", "\\").split("\\") if part]
+    if segments:
+        prefix = _match_folder_alias(segments[0].casefold())
+        if prefix is not None:
+            base = resolve_known_folder(prefix)
+            if len(segments) > 1:
+                return str(base.joinpath(*segments[1:]))
+            return str(base)
     base = Path(context_dir) if context_dir else Path.home()
     return str(base / value)
 
@@ -497,8 +511,19 @@ def list_directory(path: str | Path) -> dict[str, object]:
     except OSError as exc:
         raise WindowsFSError("OS_ERROR", f"Could not list {resolved}: {exc}") from exc
 
+    # Folders first, then files (each alphabetical): navigation targets
+    # must never be silently pushed out by the entry cap - a folder sorted
+    # past 200 files was invisible, and the agent then reported the folder
+    # as missing.
+    folders: list[Path] = []
+    plain_files: list[Path] = []
+    for entry in raw_entries:
+        (folders if entry.is_dir() else plain_files).append(entry)
+    folders.sort(key=lambda item: item.name.casefold())
+    plain_files.sort(key=lambda item: item.name.casefold())
+
     entries: list[dict[str, object]] = []
-    for entry in sorted(raw_entries, key=lambda item: item.name.casefold()):
+    for entry in [*folders, *plain_files]:
         if len(entries) >= MAX_LIST_ENTRIES:
             break
         try:
@@ -555,20 +580,36 @@ def search_files(
         candidates = _iter_directory(resolved_root)
 
     results: list[str] = []
+    exact: list[str] = []
     truncated = False
     try:
         for file_path in candidates:
             if not matches(file_path.name):
                 continue
+            if not wildcard and file_path.name.casefold() == needle:
+                # An item literally named like the query is what was asked
+                # for: keep it even when substring matches would fill the
+                # cap before the walk ever reaches it.
+                if len(exact) < max_results:
+                    exact.append(str(file_path))
+                else:
+                    truncated = True
+                continue
             if len(results) >= max_results:
                 truncated = True
-                break
+                continue  # keep walking: an exact match may still appear
             results.append(str(file_path))
     except PermissionError as exc:
         raise WindowsFSError(
             "ACCESS_DENIED", f"Access denied while searching {resolved_root}."
         ) from exc
+    exact.sort(key=str.casefold)
     results.sort(key=str.casefold)
+    combined = [*exact, *results]
+    if len(combined) > max_results:
+        truncated = True
+        combined = combined[:max_results]
+    results = combined
     return {
         "root": str(resolved_root),
         "pattern": query,

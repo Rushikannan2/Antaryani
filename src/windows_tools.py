@@ -435,7 +435,8 @@ class WindowsTools:
 
         Args:
             path: Where to create it - location name, full path, or a
-                relative name resolved against the last-used folder.
+                relative name; one starting with a standard folder name
+                (Downloads, Desktop, ...) always means that folder.
         """
         try:
             resolved = self._resolve(path)

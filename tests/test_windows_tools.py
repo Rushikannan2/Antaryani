@@ -974,6 +974,46 @@ async def test_rename_empty_folder_tool(tmp_path) -> None:
     assert str(result["to"]).endswith("new-empty")
 
 
+async def test_known_folder_relative_path_survives_live_session_sequence(
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    import windows_fs
+
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    original = windows_fs.resolve_known_folder
+    monkeypatch.setattr(
+        windows_fs,
+        "resolve_known_folder",
+        lambda name: downloads if name == "downloads" else original(name),
+    )
+    tools = WindowsTools()
+    context = make_context()
+
+    # Seed the "last-used folder" context away from Downloads - the state
+    # that broke every later relative path in the live session.
+    await tools.list_directory(context, path=str(tmp_path))
+
+    created = await tools.create_folder(context, path="Downloads\\Rushi")
+    assert Path(created["path"]).resolve() == (downloads / "Rushi").resolve()
+    assert (downloads / "Rushi").is_dir()
+
+    # Same relative reference again while the context points at the created
+    # folder: it must still resolve against Downloads, never double up.
+    renamed = await tools.rename_path(
+        context, source="Downloads\\Rushi", new_name="Kannan"
+    )
+    assert Path(renamed["to"]).name == "Kannan"
+    assert (downloads / "Kannan").is_dir()
+    assert not (downloads / "Rushi").exists()
+
+    await tools.list_directory(context, path="Downloads")
+    info = await tools.get_file_info(context, path="Downloads\\Kannan")
+    assert info["name"] == "Kannan"
+
+
 async def test_search_files_tool_includes_folders(tmp_path) -> None:
     (tmp_path / "meeting-notes").mkdir()
     (tmp_path / "meeting.txt").write_text("x", encoding="utf-8")
